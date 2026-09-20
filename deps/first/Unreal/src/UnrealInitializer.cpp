@@ -24,6 +24,14 @@
 #include <Unreal/FAssetData.hpp>
 #include <Unreal/AActor.hpp>
 #include <Unreal/AGameModeBase.hpp>
+#include <Unreal/UField.hpp>
+#include <Unreal/UStruct.hpp>
+#include <Unreal/UClass.hpp>
+#include <Unreal/UScriptStruct.hpp>
+#include <Unreal/Engine/UDataTable.hpp>
+#include <Unreal/FField.hpp>
+#include <Unreal/FProperty.hpp>
+#include <Unreal/Property/FNumericProperty.hpp>
 #include <Unreal/ULocalPlayer.hpp>
 #include <Unreal/Searcher/ObjectSearcher.hpp>
 #include <Unreal/ClassListener.hpp>
@@ -1108,10 +1116,33 @@ namespace RC::Unreal::UnrealInitializer
                 // Verified: vtable[0x268] = real ProcessEvent (GDB Conv_NameToString
                 // call returns "Actor"); PostLoad/BeginDestroy/FinishDestroy are at
                 // standard offsets.
-                UObject::VTableLayoutMap[STR("ProcessEvent")] = 0x268;
-                UObject::VTableLayoutMap[STR("GetFunctionCallspace")] = 0x270;
-                UObject::VTableLayoutMap[STR("CallRemoteFunction")] = 0x278;
-                UObject::VTableLayoutMap[STR("ProcessConsoleExec")] = 0x280;
+                // palhook (runs 21 to 35, 2026-09-19/20): on this binary every VTableLayoutMap
+                // entry after the destructor slot is the MSVC-derived 5.1 baseline +8, in every
+                // class checked, because the Itanium ABI spends two vtable slots on a virtual
+                // destructor. Verified by disassembly and GDB: FProperty (GetCPPType 0x70 builds
+                // "float", 0x68 is `xor eax,eax; ret`), UObject (ProcessEvent 0x268), UStruct and
+                // UScriptStruct (InitializeStruct 0x300, DestroyStruct 0x308), ICppStructOps
+                // (Construct 0x18, Destruct 0x28), UDataTable (Serialize 0xD0), FMalloc (Malloc
+                // 0x18, Free 0x38). Applied to exactly those maps. AActor and AGameModeBase keep
+                // their audited entries below (also baseline +8); UEngine is left alone because
+                // its Tick at 0x2F0 is soak-proven and 0x2F8 crashes as Tick.
+                auto shift_map = [](auto& map, const CharType* name) {
+                    size_t shifted = 0;
+                    for (auto& [key, offset] : map)
+                    {
+                        if (offset != 0) { offset += 8; ++shifted; }
+                    }
+                    Output::send(STR("Palworld vtable override: {} entries of {} shifted +8 from the 5.1 baseline\n"), shifted, name);
+                };
+                shift_map(UObject::VTableLayoutMap, STR("UObject"));
+                shift_map(UField::VTableLayoutMap, STR("UField"));
+                shift_map(UStruct::VTableLayoutMap, STR("UStruct"));
+                shift_map(UClass::VTableLayoutMap, STR("UClass"));
+                shift_map(UScriptStruct::ICppStructOps::VTableLayoutMap, STR("UScriptStruct::ICppStructOps"));
+                shift_map(UDataTable::VTableLayoutMap, STR("UDataTable"));
+                shift_map(FField::VTableLayoutMap, STR("FField"));
+                shift_map(FProperty::VTableLayoutMap, STR("FProperty"));
+                shift_map(FNumericProperty::VTableLayoutMap, STR("FNumericProperty"));
 
                 // AActor: the tick-prerequisite adapter thunks at 0x378/0x380
                 // (passing this+0x28 = PrimaryActorTick, arg+0x28/0x30 = actor vs
@@ -1138,12 +1169,7 @@ namespace RC::Unreal::UnrealInitializer
                 // shifting GetMinAlignment and subsequent virtuals by +8.
                 // Verified at runtime: vtable[0x148] = ret;int3 (stub),
                 // vtable[0x150] = real function returning alignment (4, 8, etc.).
-                FProperty::VTableLayoutMap[STR("GetMinAlignment")] = 0x150;
-                FProperty::VTableLayoutMap[STR("ContainsObjectReference")] = 0x158;
-                FProperty::VTableLayoutMap[STR("EmitReferenceInfo")] = 0x160;
-                FProperty::VTableLayoutMap[STR("SameType")] = 0x168;
-
-                Output::send(STR("Palworld vtable override: +8 shift applied to all UObject-derived maps from 0x260, FProperty GetMinAlignment=0x150\n"));
+                // (FProperty GetMinAlignment 0x150 etc. now come from the shift above.)
 
                 // Self-healing sweep: re-derive the AActor-region offsets from
                 // the binary by consensus over all AActor-family vtables, so a
