@@ -101,18 +101,6 @@ static thread_local bool s_has_alloc_jmpbuf = false;
 static struct sigaction s_old_sigsegv;
 static struct sigaction s_old_sigbus;
 
-// Deliberate init abort (palhook): used when a precondition proves the allocator or a vtable layout
-// unverified. Lands on the same recovery point as a crash during init, without a C++ throw, because
-// __cxa_throw resolves to libsteam_api's variant in this process and faults.
-static const int kUE4SSInitAborted = 1000;
-extern "C" void ue4ss_abort_init(const char* reason)
-{
-    UE4SS_ERR("[UE4SS] init aborted: %s\n", reason ? reason : "");
-    if (s_has_jmpbuf) siglongjmp(s_init_jmpbuf, kUE4SSInitAborted);
-    UE4SS_ERR("[UE4SS] init abort requested outside the init recovery scope; raising SIGABRT\n");
-    abort();
-}
-
 static void ue4ss_sigsegv_handler(int sig, siginfo_t* info, void* ucontext)
 {
     (void)info;
@@ -343,8 +331,7 @@ static auto thread_dll_start() -> void
         int sig = sigsetjmp(s_init_jmpbuf, 1);
         if (sig != 0)
         {
-            if (sig == kUE4SSInitAborted) UE4SS_ERR("[UE4SS] init aborted deliberately (see reason above); no mods started, game continues.\n");
-            else UE4SS_ERR("[UE4SS] Recovered from signal %d. UE4SS init failed but game should continue.\n", sig);
+            UE4SS_ERR("[UE4SS] Recovered from signal %d. UE4SS init failed but game should continue.\n", sig);
             s_has_jmpbuf = false;
             restore_signal_handlers();
             return;
@@ -422,6 +409,16 @@ static void ue4ss_linux_cleanup()
 {
     if (s_ue4ss_initialized.load(std::memory_order_acquire))
     {
+        if (Unreal::UnrealInitializer::StaticStorage::bInitRefused)
+        {
+            // palhook: initialization stopped early on a validation refusal, so the program object is
+            // only partly built and no hook was installed. This bypass is process-exit behavior for that
+            // one state and nothing else: it is not support for unloading libUE4SS or retrying
+            // initialization, and a refused init cannot be resumed. Tearing the partial object down here
+            // faulted intermittently (run 44b) and gains nothing while the process exits.
+            UE4SS_DBG("[UE4SS] initialization was refused; skipping cleanup on exit.\n");
+            return;
+        }
         UE4SS_DBG("[UE4SS] Cleaning up...\n");
         UE4SSProgram::static_cleanup();
         if (s_program)

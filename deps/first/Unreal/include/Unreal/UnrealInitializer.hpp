@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <functional>
 #include <filesystem>
+#include <string>
 #include <thread>
 
 #include <File/File.hpp>
@@ -145,6 +146,10 @@ namespace RC::Unreal::UnrealInitializer
         RC_UE_API static bool bScanFullyCompleted;
         RC_UE_API static std::atomic_bool FNameVerificationStatus;
         RC_UE_API static std::atomic_bool FNameVerificationStartedUnhooking;
+        // palhook (Linux): set when a validation precondition fails (allocator resolver, vtable layout).
+        // Initialization returns normally at the next checkpoint and no hooks or mods are started.
+        RC_UE_API static bool bInitRefused;
+        RC_UE_API static std::string InitRefusalReason;
     };
 
     // Returns the address of a symbol exported by any of loaded modules.

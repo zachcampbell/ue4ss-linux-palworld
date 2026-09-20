@@ -230,7 +230,6 @@ static void* ue4ss_resolve_gmalloc_from_operator_new(char* why, size_t why_len)
 extern "C" bool ue4ss_with_crash_recovery(const std::function<void()>& func);
 extern "C" bool ue4ss_with_iter_recovery(const std::function<void()>& func);
 extern "C" bool ue4ss_with_alloc_recovery(const std::function<void()>& func);
-extern "C" void ue4ss_abort_init(const char* reason);
 #endif
 
 namespace RC
@@ -803,6 +802,11 @@ namespace RC
         try
         {
             setup_unreal();
+            if (Unreal::UnrealInitializer::StaticStorage::bInitRefused)
+            {
+                UE4SS_ERR("[UE4SS] init: initialization refused; no C++ or Lua mods started, game continues.\n");
+                return;
+            }
 
 #ifdef __linux__
             // Now that setup_unreal() has resolved UE addresses, start C++ mods
@@ -1929,7 +1933,9 @@ namespace RC
                             std::string msg = std::string("GMalloc resolver failed (") + why + "); refusing to initialize with an unverified allocator";
                             UE4SS_DBG("[UE4SS] %s\n", msg.c_str());
                             Output::send<LogLevel::Error>(STR("{}\n"), ensure_str(msg));
-                            ue4ss_abort_init(msg.c_str());
+                            Unreal::UnrealInitializer::StaticStorage::bInitRefused = true;
+                            Unreal::UnrealInitializer::StaticStorage::InitRefusalReason = msg;
+                            return;
                         }
                     }
 
@@ -2966,6 +2972,12 @@ namespace RC
         UE4SS_DBG( "[UE4SS] Calling UnrealInitializer::Initialize()...\n");
         Unreal::UnrealInitializer::Initialize(config);
         UE4SS_DBG( "[UE4SS] UnrealInitializer::Initialize() done.\n");
+        if (Unreal::UnrealInitializer::StaticStorage::bInitRefused)
+        {
+            UE4SS_ERR("[UE4SS] setup_unreal: initialization refused, not loading mods: %s\n", Unreal::UnrealInitializer::StaticStorage::InitRefusalReason.c_str());
+            copy_error_into_message(Unreal::UnrealInitializer::StaticStorage::InitRefusalReason.c_str());
+            return;
+        }
 
 #ifdef __linux__
         // On Linux, the engine tick hook is never installed by default (needs resolved

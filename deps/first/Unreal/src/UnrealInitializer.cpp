@@ -34,7 +34,6 @@
 #include <Unreal/Property/FNumericProperty.hpp>
 #include <Unreal/PalworldVTableBaseline_5_01.hpp>
 #include <cstdlib>
-extern "C" void ue4ss_abort_init(const char* reason);
 #include <Unreal/ULocalPlayer.hpp>
 #include <Unreal/Searcher/ObjectSearcher.hpp>
 #include <Unreal/ClassListener.hpp>
@@ -65,6 +64,8 @@ namespace RC::Unreal::UnrealInitializer
     Config StaticStorage::GlobalConfig{};
     bool StaticStorage::bPreInitCompleted{};
     bool StaticStorage::bScanFullyCompleted{};
+    bool StaticStorage::bInitRefused{};
+    std::string StaticStorage::InitRefusalReason{};
     std::atomic_bool StaticStorage::FNameVerificationStatus{false};
     std::atomic_bool StaticStorage::FNameVerificationStartedUnhooking{false};
 
@@ -1074,6 +1075,11 @@ namespace RC::Unreal::UnrealInitializer
         }
 
 #ifdef __linux__
+        if (StaticStorage::bInitRefused)
+        {
+            Output::send<LogLevel::Error>(STR("ScanGame: stopping, initialization refused: {}\n"), ensure_str(StaticStorage::InitRefusalReason));
+            return;
+        }
         Output::send(STR("ScanGame: calling InitializeVersionedContainer()...\n"));
 #endif
         InitializeVersionedContainer();
@@ -1129,61 +1135,87 @@ namespace RC::Unreal::UnrealInitializer
                 // 0x18, Free 0x38). Applied to exactly those maps. AActor and AGameModeBase keep
                 // their audited entries below (also baseline +8); UEngine is left alone because
                 // its Tick at 0x2F0 is soak-proven and 0x2F8 crashes as Tick.
-                // Precondition: every entry of the map must equal the generated 5.1 baseline (so a partially
-                // customized map is caught, not just a fully shifted one). Three outcomes:
-                //   full baseline match          -> shift +8 (the layout this build was verified against)
-                //   full baseline+8 match        -> already corrected (custom VTableLayout.ini or a prior pass); leave it
-                //   anything else, or empty      -> unknown layout; throw so UE4SS reports it and starts no mods
-                // The one exception is an empty map with no baseline entries wired in (UClass on this build).
-                auto shift_map = [](auto& map, const CharType* name, const VtBaseline* base, size_t n) {
-                    size_t matched = 0, corrected = 0, extra = 0, present = 0;
-                    for (size_t i = 0; i < n; ++i)
+                // Validate every required map against the generated 5.1 baseline before changing any of
+                // them (PalworldVTableBaseline_5_01.hpp). Per map: full baseline match -> shift +8; full
+                // baseline+8 match -> already corrected, leave; empty with no body wired in (UClass here) ->
+                // report, leave; anything else -> unknown layout. One unknown layout refuses the whole set:
+                // no map is changed, StaticStorage::bInitRefused carries the reason, and initialization
+                // returns normally before any hook or mod. No throw: __cxa_throw resolves to
+                // libsteam_api's variant in this process and faults.
+                enum class MapState { Empty, Baseline, Corrected, Mismatch };
+                struct MapCheck { std::unordered_map<File::StringType, uint32_t>* map; const CharType* name; const VtBaseline* base; size_t n; MapState state; StringType detail; };
+                auto classify = [](MapCheck& c) {
+                    size_t matched = 0, corrected = 0, extra = 0, present = 0; StringType unknown;
+                    for (size_t i = 0; i < c.n; ++i)
                     {
-                        if (base[i].offset == 0) continue;
+                        if (c.base[i].offset == 0) continue;
                         ++present;
-                        auto it = map.find(base[i].name);
-                        if (it == map.end()) continue;
-                        if (it->second == base[i].offset) ++matched;
-                        else if (it->second == base[i].offset + 8) ++corrected;
+                        auto it = c.map->find(c.base[i].name);
+                        if (it == c.map->end()) continue;
+                        if (it->second == c.base[i].offset) ++matched;
+                        else if (it->second == c.base[i].offset + 8) ++corrected;
                     }
-                    for (auto& [key, offset] : map) { if (offset == 0) continue; bool known = false; for (size_t i = 0; i < n; ++i) if (key == base[i].name) { known = true; break; } if (!known) ++extra; }
-                    if (map.empty())
+                    for (auto& [key, offset] : *c.map)
                     {
-                        Output::send<LogLevel::Warning>(STR("Palworld vtable override: {} map is empty, nothing to shift\n"), name);
-                        return;
+                        if (offset == 0) continue;
+                        bool known = false;
+                        for (size_t i = 0; i < c.n; ++i) if (key == c.base[i].name) { known = true; break; }
+                        if (!known) { ++extra; if (unknown.size() < 1500) unknown += fmt::format(STR(" {}={:#x}"), key, offset); }
                     }
-                    if (matched == present && extra == 0)
-                    {
-                        for (auto& [key, offset] : map) { if (offset != 0) offset += 8; }
-                        Output::send(STR("Palworld vtable override: {} verified as the 5.1 baseline ({} entries), shifted +8\n"), name, matched);
-                        return;
-                    }
-                    if (corrected == present && extra == 0)
-                    {
-                        Output::send(STR("Palworld vtable override: {} already holds baseline+8 ({} entries), left as is\n"), name, corrected);
-                        return;
-                    }
-                    StringType unknown;
-                    for (auto& [key, offset] : map) { if (offset == 0) continue; bool known = false; for (size_t i = 0; i < n; ++i) if (key == base[i].name) { known = true; break; } if (!known && unknown.size() < 1500) unknown += fmt::format(STR(" {}={:#x}"), key, offset); }
-                    auto msg = fmt::format(STR("Palworld vtable override: {} does not match the 5.1 baseline ({} of {} baseline entries, {} already +8, {} unknown keys:{}); refusing to guess a vtable layout. Remove custom VTableLayout entries for this class or update the baseline."),
-                                           name, matched, present, corrected, extra, unknown);
-                    Output::send<LogLevel::Error>(STR("{}\n"), msg);
-                    ue4ss_abort_init(to_string(msg).c_str());
+                    if (c.map->empty()) { c.state = MapState::Empty; return; }
+                    if (matched == present && extra == 0) { c.state = MapState::Baseline; c.detail = fmt::format(STR("{}"), matched); return; }
+                    if (corrected == present && extra == 0) { c.state = MapState::Corrected; c.detail = fmt::format(STR("{}"), corrected); return; }
+                    c.state = MapState::Mismatch;
+                    c.detail = fmt::format(STR("{} of {} baseline entries, {} already +8, {} unknown keys:{}"), matched, present, corrected, extra, unknown);
                 };
                 // UGameViewportClient declares no map of its own in this port, so its 5.1 body lands in
                 // UObject's map; the baseline for that map is the union of the two tables.
                 std::vector<VtBaseline> uobject_baseline(std::begin(kVt_UObject), std::end(kVt_UObject));
                 uobject_baseline.insert(uobject_baseline.end(), std::begin(kVt_UGameViewportClient), std::end(kVt_UGameViewportClient));
                 if (std::getenv("UE4SS_PALHOOK_FORCE_LAYOUT_MISMATCH")) UObject::VTableLayoutMap[STR("PalhookForcedMismatch")] = 0x8; // test hook for the refusal path
-                shift_map(UObject::VTableLayoutMap, STR("UObject"), uobject_baseline.data(), uobject_baseline.size());
-                shift_map(UField::VTableLayoutMap, STR("UField"), kVt_UField, std::size(kVt_UField));
-                shift_map(UStruct::VTableLayoutMap, STR("UStruct"), kVt_UStruct, std::size(kVt_UStruct));
-                shift_map(UClass::VTableLayoutMap, STR("UClass"), kVt_UClass, std::size(kVt_UClass));
-                shift_map(UScriptStruct::ICppStructOps::VTableLayoutMap, STR("UScriptStruct::ICppStructOps"), kVt_UScriptStruct_ICppStructOps, std::size(kVt_UScriptStruct_ICppStructOps));
-                shift_map(UDataTable::VTableLayoutMap, STR("UDataTable"), kVt_UDataTable, std::size(kVt_UDataTable));
-                shift_map(FField::VTableLayoutMap, STR("FField"), kVt_FField, std::size(kVt_FField));
-                shift_map(FProperty::VTableLayoutMap, STR("FProperty"), kVt_FProperty, std::size(kVt_FProperty));
-                shift_map(FNumericProperty::VTableLayoutMap, STR("FNumericProperty"), kVt_FNumericProperty, std::size(kVt_FNumericProperty));
+                std::vector<MapCheck> checks = {
+                    {&UObject::VTableLayoutMap, STR("UObject"), uobject_baseline.data(), uobject_baseline.size(), MapState::Empty, {}},
+                    {&UField::VTableLayoutMap, STR("UField"), kVt_UField, std::size(kVt_UField), MapState::Empty, {}},
+                    {&UStruct::VTableLayoutMap, STR("UStruct"), kVt_UStruct, std::size(kVt_UStruct), MapState::Empty, {}},
+                    {&UClass::VTableLayoutMap, STR("UClass"), kVt_UClass, std::size(kVt_UClass), MapState::Empty, {}},
+                    {&UScriptStruct::ICppStructOps::VTableLayoutMap, STR("UScriptStruct::ICppStructOps"), kVt_UScriptStruct_ICppStructOps, std::size(kVt_UScriptStruct_ICppStructOps), MapState::Empty, {}},
+                    {&UDataTable::VTableLayoutMap, STR("UDataTable"), kVt_UDataTable, std::size(kVt_UDataTable), MapState::Empty, {}},
+                    {&FField::VTableLayoutMap, STR("FField"), kVt_FField, std::size(kVt_FField), MapState::Empty, {}},
+                    {&FProperty::VTableLayoutMap, STR("FProperty"), kVt_FProperty, std::size(kVt_FProperty), MapState::Empty, {}},
+                    {&FNumericProperty::VTableLayoutMap, STR("FNumericProperty"), kVt_FNumericProperty, std::size(kVt_FNumericProperty), MapState::Empty, {}},
+                };
+                StringType refusal;
+                for (auto& c : checks)
+                {
+                    classify(c);
+                    if (c.state == MapState::Mismatch)
+                    {
+                        Output::send<LogLevel::Error>(STR("Palworld vtable override: {} does not match the 5.1 baseline ({})\n"), c.name, c.detail);
+                        refusal += fmt::format(STR("{} ({}); "), c.name, c.detail);
+                    }
+                }
+                if (!refusal.empty())
+                {
+                    StaticStorage::bInitRefused = true;
+                    StaticStorage::InitRefusalReason = to_string(fmt::format(STR("Palworld vtable layout check refused, no map was changed: {}remove custom VTableLayout entries for these classes or update the baseline"), refusal));
+                    Output::send<LogLevel::Error>(STR("{}\n"), ensure_str(StaticStorage::InitRefusalReason));
+                }
+                else
+                {
+                    for (auto& c : checks)
+                    {
+                        switch (c.state)
+                        {
+                        case MapState::Empty: Output::send<LogLevel::Warning>(STR("Palworld vtable override: {} map is empty, nothing to shift\n"), c.name); break;
+                        case MapState::Corrected: Output::send(STR("Palworld vtable override: {} already holds baseline+8 ({} entries), left as is\n"), c.name, c.detail); break;
+                        case MapState::Baseline:
+                            for (auto& [key, offset] : *c.map) { if (offset != 0) offset += 8; }
+                            Output::send(STR("Palworld vtable override: {} verified as the 5.1 baseline ({} entries), shifted +8\n"), c.name, c.detail);
+                            break;
+                        case MapState::Mismatch: break;
+                        }
+                    }
+                }
 
                 // AActor: the tick-prerequisite adapter thunks at 0x378/0x380
                 // (passing this+0x28 = PrimaryActorTick, arg+0x28/0x30 = actor vs
@@ -1217,7 +1249,7 @@ namespace RC::Unreal::UnrealInitializer
                 // Palworld update that shuffles the region keeps working.
                 // The hardcoded values above are the fallback if the sweep is
                 // inconclusive.
-                sweep_actor_vtable_offsets();
+                if (!StaticStorage::bInitRefused) sweep_actor_vtable_offsets();
             }
         }
 #endif
@@ -1351,6 +1383,11 @@ namespace RC::Unreal::UnrealInitializer
 #ifdef __linux__
             Output::send(STR("Initialize: ScanGame() done.\n"));
 #endif
+        }
+        if (StaticStorage::bInitRefused)
+        {
+            Output::send<LogLevel::Error>(STR("Initialize: refused, no hooks installed: {}\n"), ensure_str(StaticStorage::InitRefusalReason));
+            return;
         }
 
 #ifdef __linux__
