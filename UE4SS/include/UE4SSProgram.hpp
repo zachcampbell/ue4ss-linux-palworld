@@ -112,6 +112,8 @@ namespace RC
         // palhook (Linux): stop the event loop and wait for it; called from the engine's UObject-array shutdown
         // notification so no mod update runs while the game tears its heap down at exit.
         auto stop_event_loop() -> void;
+        auto request_event_loop_stop() -> void;
+        std::atomic<bool> m_event_loop_finished{false};
         static inline std::atomic_bool cpp_mods_done_loading{};
 
       public:

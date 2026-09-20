@@ -783,21 +783,30 @@ namespace RC
         void NotifyUObjectDeleted(const Unreal::UObjectBase*, int32_t) override {}
         void OnUObjectArrayShutdown() override
         {
+            // Flags only: joining here deadlocked when the loop thread was inside a mod update that itself waits
+            // on the game thread (shadow run 99, 60 s hang at SIGTERM). The loop exits on its own after the
+            // current iteration; the destructor's bounded wait covers the rest.
             UE4SSProgram::unreal_is_shutting_down = true;
-            UE4SSProgram::get_program().stop_event_loop();
-            UE4SS_DBG("[UE4SS] Linux: UObject array shutting down; event loop stopped.\n");
+            UE4SSProgram::get_program().request_event_loop_stop();
+            UE4SS_DBG("[UE4SS] Linux: UObject array shutting down; event loop stop requested.\n");
         }
     };
     static FLinuxEngineShutdownListener s_linux_engine_shutdown_listener{};
 #endif
 
+    auto UE4SSProgram::request_event_loop_stop() -> void
+    {
+        m_processing_events = false;
+    }
+
     auto UE4SSProgram::stop_event_loop() -> void
     {
         m_processing_events = false;
-        if (m_event_loop.joinable() && m_event_loop.get_id() != std::this_thread::get_id())
-        {
-            m_event_loop.join();
-        }
+        if (!m_event_loop.joinable() || m_event_loop.get_id() == std::this_thread::get_id()) return;
+        // Bounded: wait up to 3 s for update() to return, then detach rather than hang the process exit.
+        for (int i = 0; i < 300 && !m_event_loop_finished.load(); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        if (m_event_loop_finished.load()) m_event_loop.join();
+        else { UE4SS_DBG("[UE4SS] Linux: event loop did not stop within 3 s; detaching it.\n"); m_event_loop.detach(); }
     }
 
     UE4SSProgram::~UE4SSProgram()
@@ -3334,6 +3343,7 @@ namespace RC
 
     auto UE4SSProgram::update() -> void
     {
+        struct FinishedFlag { std::atomic<bool>& f; ~FinishedFlag() { f.store(true); } } finished_flag{m_event_loop_finished};
         ProfilerSetThreadName("UE4SS-UpdateThread");
         m_event_loop_thread_id = std::this_thread::get_id();
 
