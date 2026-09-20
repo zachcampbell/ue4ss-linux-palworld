@@ -16,6 +16,7 @@
 #else
 #include <unistd.h>
 #include <dlfcn.h>
+#include <fcntl.h>
 #include <funchook.h>
 #endif
 
@@ -64,9 +65,9 @@
 // real instruction boundaries with Zydis, takes the first 64-bit rip-relative MOV load in FMemory::Malloc,
 // requires an indirect JMP/CALL to follow it (the vtable dispatch), and validates the mappings: GMalloc in a
 // writable PT_LOAD of the main executable, the instance non-null, its vtable in a read-only PT_LOAD, and
-// vtable slot 3 (Malloc on this ABI) in an executable one. Verified on PalServer-Linux-Shipping
-// v1.0.5.102999: _Znwm 0x6f686e0 -> FMemory::Malloc 0x7810c20 -> GMalloc 0xc07f6a8. There is no fallback:
-// an unverified allocator is worse than no mods.
+// the dispatched vtable slot in an executable one. This is a validated resolver for the PalServer-Linux
+// build (v1.0.5.102999: _Znwm 0x6f686e0 -> FMemory::Malloc 0x7810c20 -> GMalloc 0xc07f6a8, slot 0x18), not a
+// general allocator-discovery algorithm. There is no fallback: an unverified allocator is worse than no mods.
 namespace
 {
     struct ExeSegments { std::vector<std::pair<uintptr_t, uintptr_t>> writable, readonly, exec; };
@@ -94,6 +95,15 @@ namespace
         for (auto& [lo, hi] : v) if (a >= lo && a < hi) return true;
         return false;
     }
+    // Read process memory without faulting: pread on /proc/self/mem returns EIO for anything unmapped.
+    bool safe_read_u64(uintptr_t addr, uint64_t& out)
+    {
+        static int fd = open("/proc/self/mem", O_RDONLY | O_CLOEXEC);
+        if (fd < 0) return false;
+        return pread(fd, &out, sizeof out, static_cast<off_t>(addr)) == static_cast<ssize_t>(sizeof out);
+    }
+    // 64-bit register that a decoded operand names, widened (edi -> rdi etc.), or NONE.
+    ZydisRegister full_reg(ZydisRegister r) { auto w = ZydisRegisterGetLargestEnclosing(ZYDIS_MACHINE_MODE_LONG_64, r); return w == ZYDIS_REGISTER_NONE ? r : w; }
 }
 static void* ue4ss_resolve_gmalloc_from_operator_new(char* why, size_t why_len)
 {
@@ -124,36 +134,56 @@ static void* ue4ss_resolve_gmalloc_from_operator_new(char* why, size_t why_len)
     if (!target) { snprintf(why, why_len, "no direct jmp within 16 instructions of _Znwm"); return nullptr; }
     if (!in_segments(segs.exec, target)) { snprintf(why, why_len, "_Znwm jumps outside the executable's text (%#lx)", target); return nullptr; }
 
-    // 2. In FMemory::Malloc: first 64-bit rip-relative MOV load, then an indirect JMP/CALL (vtable dispatch).
-    uintptr_t gmalloc = 0; bool dispatch = false; ip = target;
-    for (int n = 0; n < 40 && !dispatch; ++n)
+    // 2. In FMemory::Malloc: the first 64-bit rip-relative MOV load names GMalloc. Then follow the value:
+    //    reg_g = [rip+GMalloc]; reg_i = [reg_g] (instance); reg_f = [reg_i + slot] (vtable slot); jmp/call reg_f.
+    //    Only a dispatch through that chain counts, and the slot displacement is recorded (0x18 on this build).
+    uintptr_t gmalloc = 0; bool dispatch = false; uint32_t slot = 0; ip = target;
+    ZydisRegister reg_g = ZYDIS_REGISTER_NONE, reg_i = ZYDIS_REGISTER_NONE, reg_f = ZYDIS_REGISTER_NONE;
+    for (int n = 0; n < 48 && !dispatch; ++n)
     {
         if (!ZYAN_SUCCESS(ZydisDecoderDecodeFull(&decoder, reinterpret_cast<const void*>(ip), 16, &insn, ops))) { snprintf(why, why_len, "undecodable instruction in FMemory::Malloc at %#lx", ip); return nullptr; }
-        if (!gmalloc && insn.mnemonic == ZYDIS_MNEMONIC_MOV && ops[0].type == ZYDIS_OPERAND_TYPE_REGISTER && ops[1].type == ZYDIS_OPERAND_TYPE_MEMORY
-            && ops[1].mem.base == ZYDIS_REGISTER_RIP && ops[1].size == 64)
+        const bool is_mov_reg_mem = insn.mnemonic == ZYDIS_MNEMONIC_MOV && ops[0].type == ZYDIS_OPERAND_TYPE_REGISTER && ops[1].type == ZYDIS_OPERAND_TYPE_MEMORY && ops[1].size == 64;
+        ZydisRegister dst = ops[0].type == ZYDIS_OPERAND_TYPE_REGISTER ? full_reg(ops[0].reg.value) : ZYDIS_REGISTER_NONE;
+        bool handled = false;
+        if (is_mov_reg_mem && ops[1].mem.base == ZYDIS_REGISTER_RIP)
         {
             ZyanU64 abs = 0;
-            if (ZYAN_SUCCESS(ZydisCalcAbsoluteAddress(&insn, &ops[1], ip, &abs))) gmalloc = static_cast<uintptr_t>(abs);
+            if (ZYAN_SUCCESS(ZydisCalcAbsoluteAddress(&insn, &ops[1], ip, &abs)) && (gmalloc == 0 || gmalloc == abs)) { gmalloc = static_cast<uintptr_t>(abs); reg_g = dst; handled = true; }
         }
-        else if (gmalloc && (insn.mnemonic == ZYDIS_MNEMONIC_JMP || insn.mnemonic == ZYDIS_MNEMONIC_CALL) && ops[0].type != ZYDIS_OPERAND_TYPE_IMMEDIATE)
+        else if (is_mov_reg_mem && reg_g != ZYDIS_REGISTER_NONE && full_reg(ops[1].mem.base) == reg_g && ops[1].mem.disp.value == 0 && ops[1].mem.index == ZYDIS_REGISTER_NONE)
         {
-            dispatch = true;
+            reg_i = dst; handled = true;
         }
-        else if (insn.mnemonic == ZYDIS_MNEMONIC_RET && gmalloc) { break; }
+        else if (is_mov_reg_mem && reg_i != ZYDIS_REGISTER_NONE && full_reg(ops[1].mem.base) == reg_i && ops[1].mem.index == ZYDIS_REGISTER_NONE)
+        {
+            reg_f = dst; slot = static_cast<uint32_t>(ops[1].mem.disp.value); handled = true;
+        }
+        else if ((insn.mnemonic == ZYDIS_MNEMONIC_JMP || insn.mnemonic == ZYDIS_MNEMONIC_CALL) && ops[0].type == ZYDIS_OPERAND_TYPE_REGISTER && reg_f != ZYDIS_REGISTER_NONE && full_reg(ops[0].reg.value) == reg_f)
+        {
+            dispatch = true; handled = true;
+        }
+        else if (insn.mnemonic == ZYDIS_MNEMONIC_RET) { break; }
+        if (!handled && dst != ZYDIS_REGISTER_NONE)
+        {
+            // any other write to a tracked register invalidates what we thought it held
+            if (dst == reg_f) reg_f = ZYDIS_REGISTER_NONE;
+            if (dst == reg_i) { reg_i = ZYDIS_REGISTER_NONE; reg_f = ZYDIS_REGISTER_NONE; }
+            if (dst == reg_g) { reg_g = ZYDIS_REGISTER_NONE; reg_i = ZYDIS_REGISTER_NONE; reg_f = ZYDIS_REGISTER_NONE; }
+        }
         ip += insn.length;
     }
-    if (!gmalloc) { snprintf(why, why_len, "no rip-relative 64-bit load within 40 instructions of FMemory::Malloc %#lx", target); return nullptr; }
-    if (!dispatch) { snprintf(why, why_len, "no indirect jmp/call after the GMalloc load in FMemory::Malloc %#lx", target); return nullptr; }
+    if (!gmalloc) { snprintf(why, why_len, "no rip-relative 64-bit load within 48 instructions of FMemory::Malloc %#lx", target); return nullptr; }
+    if (!dispatch) { snprintf(why, why_len, "FMemory::Malloc %#lx never dispatches through the value loaded from %#lx", target, gmalloc); return nullptr; }
 
-    // 3. Validate the mappings and the object shape.
+    // 3. Validate the mappings and the object shape without faulting on a bad pointer.
     if (!in_segments(segs.writable, gmalloc)) { snprintf(why, why_len, "candidate GMalloc %#lx is not in a writable segment of the executable", gmalloc); return nullptr; }
-    uintptr_t instance = *reinterpret_cast<uintptr_t*>(gmalloc);
+    uint64_t instance = 0, vtable = 0, slot_fn = 0;
+    if (!safe_read_u64(gmalloc, instance)) { snprintf(why, why_len, "GMalloc %#lx is unreadable", gmalloc); return nullptr; }
     if (!instance) { snprintf(why, why_len, "GMalloc %#lx is still null", gmalloc); return nullptr; }
-    uintptr_t vtable = *reinterpret_cast<uintptr_t*>(instance);
+    if (!safe_read_u64(instance, vtable)) { snprintf(why, why_len, "GMalloc %#lx instance %#lx is unreadable", gmalloc, instance); return nullptr; }
     if (!in_segments(segs.readonly, vtable)) { snprintf(why, why_len, "GMalloc %#lx instance %#lx vtable %#lx is not in a read-only segment", gmalloc, instance, vtable); return nullptr; }
-    uintptr_t slot3 = reinterpret_cast<uintptr_t*>(vtable)[3];
-    if (!in_segments(segs.exec, slot3)) { snprintf(why, why_len, "allocator vtable %#lx slot 3 (%#lx) is not executable", vtable, slot3); return nullptr; }
-    snprintf(why, why_len, "_Znwm %p -> FMemory::Malloc %#lx -> GMalloc %#lx (instance %#lx, vtable %#lx, slot3 %#lx)", static_cast<void*>(op_new), target, gmalloc, instance, vtable, slot3);
+    if (!safe_read_u64(vtable + slot, slot_fn) || !in_segments(segs.exec, slot_fn)) { snprintf(why, why_len, "allocator vtable %#lx slot %#x is not an executable function", vtable, slot); return nullptr; }
+    snprintf(why, why_len, "_Znwm %p -> FMemory::Malloc %#lx -> GMalloc %#lx (instance %#lx, vtable %#lx, dispatch slot %#x -> %#lx)", static_cast<void*>(op_new), target, gmalloc, instance, vtable, slot, slot_fn);
     return reinterpret_cast<void*>(gmalloc);
 }
 #endif

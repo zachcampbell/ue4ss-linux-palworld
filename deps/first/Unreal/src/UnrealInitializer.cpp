@@ -32,6 +32,7 @@
 #include <Unreal/FField.hpp>
 #include <Unreal/FProperty.hpp>
 #include <Unreal/Property/FNumericProperty.hpp>
+#include <Unreal/PalworldVTableBaseline_5_01.hpp>
 #include <Unreal/ULocalPlayer.hpp>
 #include <Unreal/Searcher/ObjectSearcher.hpp>
 #include <Unreal/ClassListener.hpp>
@@ -1126,31 +1127,54 @@ namespace RC::Unreal::UnrealInitializer
                 // 0x18, Free 0x38). Applied to exactly those maps. AActor and AGameModeBase keep
                 // their audited entries below (also baseline +8); UEngine is left alone because
                 // its Tick at 0x2F0 is soak-proven and 0x2F8 crashes as Tick.
-                // Precondition, so a custom or already-corrected map is never shifted twice: one sentinel
-                // entry per map must still hold its untouched 5.1 baseline value. Maps that are empty on this
-                // build (UClass has no 5.1 body wired in) are reported and left alone.
-                auto shift_map = [](auto& map, const CharType* name, const CharType* sentinel, uint32_t baseline) {
-                    if (map.empty()) { Output::send<LogLevel::Warning>(STR("Palworld vtable override: {} map is empty, nothing to shift\n"), name); return; }
-                    auto it = map.find(sentinel);
-                    if (it == map.end() || it->second != baseline)
+                // Precondition: every entry of the map must equal the generated 5.1 baseline (so a partially
+                // customized map is caught, not just a fully shifted one). Three outcomes:
+                //   full baseline match          -> shift +8 (the layout this build was verified against)
+                //   full baseline+8 match        -> already corrected (custom VTableLayout.ini or a prior pass); leave it
+                //   anything else, or empty      -> unknown layout; throw so UE4SS reports it and starts no mods
+                // The one exception is an empty map with no baseline entries wired in (UClass on this build).
+                auto shift_map = [](auto& map, const CharType* name, const VtBaseline* base, size_t n) {
+                    size_t matched = 0, corrected = 0, extra = 0, present = 0;
+                    for (size_t i = 0; i < n; ++i)
                     {
-                        Output::send<LogLevel::Error>(STR("Palworld vtable override: {} sentinel {} is {:#x}, expected baseline {:#x}; map left untouched\n"),
-                                                      name, sentinel, it == map.end() ? 0u : it->second, baseline);
+                        if (base[i].offset == 0) continue;
+                        ++present;
+                        auto it = map.find(base[i].name);
+                        if (it == map.end()) continue;
+                        if (it->second == base[i].offset) ++matched;
+                        else if (it->second == base[i].offset + 8) ++corrected;
+                    }
+                    for (auto& [key, offset] : map) { if (offset == 0) continue; bool known = false; for (size_t i = 0; i < n; ++i) if (key == base[i].name) { known = true; break; } if (!known) ++extra; }
+                    if (map.empty())
+                    {
+                        Output::send<LogLevel::Warning>(STR("Palworld vtable override: {} map is empty, nothing to shift\n"), name);
                         return;
                     }
-                    size_t shifted = 0;
-                    for (auto& [key, offset] : map) { if (offset != 0) { offset += 8; ++shifted; } }
-                    Output::send(STR("Palworld vtable override: {} entries of {} shifted +8 from the 5.1 baseline (sentinel {} {:#x} -> {:#x})\n"), shifted, name, sentinel, baseline, baseline + 8);
+                    if (matched == present && extra == 0)
+                    {
+                        for (auto& [key, offset] : map) { if (offset != 0) offset += 8; }
+                        Output::send(STR("Palworld vtable override: {} verified as the 5.1 baseline ({} entries), shifted +8\n"), name, matched);
+                        return;
+                    }
+                    if (corrected == present && extra == 0)
+                    {
+                        Output::send(STR("Palworld vtable override: {} already holds baseline+8 ({} entries), left as is\n"), name, corrected);
+                        return;
+                    }
+                    auto msg = fmt::format(STR("Palworld vtable override: {} does not match the 5.1 baseline ({} of {} baseline entries, {} already +8, {} unknown keys); refusing to guess a vtable layout. Remove custom VTableLayout entries for this class or update the baseline."),
+                                           name, matched, present, corrected, extra);
+                    Output::send<LogLevel::Error>(STR("{}\n"), msg);
+                    throw std::runtime_error{to_string(msg)};
                 };
-                shift_map(UObject::VTableLayoutMap, STR("UObject"), STR("ProcessEvent"), 0x260);
-                shift_map(UField::VTableLayoutMap, STR("UField"), STR("AddCppProperty"), 0x2B0);
-                shift_map(UStruct::VTableLayoutMap, STR("UStruct"), STR("InitializeStruct"), 0x2F8);
-                shift_map(UClass::VTableLayoutMap, STR("UClass"), STR("GetAuthoritativeClass"), 0x360);
-                shift_map(UScriptStruct::ICppStructOps::VTableLayoutMap, STR("UScriptStruct::ICppStructOps"), STR("Construct"), 0x10);
-                shift_map(UDataTable::VTableLayoutMap, STR("UDataTable"), STR("GetNonConstRowMap"), 0x2B0);
-                shift_map(FField::VTableLayoutMap, STR("FField"), STR("Serialize"), 0x8);
-                shift_map(FProperty::VTableLayoutMap, STR("FProperty"), STR("GetMinAlignment"), 0x148);
-                shift_map(FNumericProperty::VTableLayoutMap, STR("FNumericProperty"), STR("IsFloatingPoint"), 0x168);
+                shift_map(UObject::VTableLayoutMap, STR("UObject"), kVt_UObject, std::size(kVt_UObject));
+                shift_map(UField::VTableLayoutMap, STR("UField"), kVt_UField, std::size(kVt_UField));
+                shift_map(UStruct::VTableLayoutMap, STR("UStruct"), kVt_UStruct, std::size(kVt_UStruct));
+                shift_map(UClass::VTableLayoutMap, STR("UClass"), kVt_UClass, std::size(kVt_UClass));
+                shift_map(UScriptStruct::ICppStructOps::VTableLayoutMap, STR("UScriptStruct::ICppStructOps"), kVt_UScriptStruct_ICppStructOps, std::size(kVt_UScriptStruct_ICppStructOps));
+                shift_map(UDataTable::VTableLayoutMap, STR("UDataTable"), kVt_UDataTable, std::size(kVt_UDataTable));
+                shift_map(FField::VTableLayoutMap, STR("FField"), kVt_FField, std::size(kVt_FField));
+                shift_map(FProperty::VTableLayoutMap, STR("FProperty"), kVt_FProperty, std::size(kVt_FProperty));
+                shift_map(FNumericProperty::VTableLayoutMap, STR("FNumericProperty"), kVt_FNumericProperty, std::size(kVt_FNumericProperty));
 
                 // AActor: the tick-prerequisite adapter thunks at 0x378/0x380
                 // (passing this+0x28 = PrimaryActorTick, arg+0x28/0x30 = actor vs
