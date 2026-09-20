@@ -1889,6 +1889,19 @@ namespace RC
                                 }
                                 if (!func_start) func_start = pattern_pos;
 
+                                // palhook: the back-scan accepted 0x452a50d on PalServer-Linux, the byte after a
+                                // `jne rel8` whose displacement happens to be 0xC3, i.e. the middle of a loop; the
+                                // post-hook then patched a jmp into that loop and PalSchema's first construct
+                                // faulted (shadow runs 63 to 65). Functions in this binary start 16-byte aligned
+                                // behind int3 padding; anything else is not a function start and is rejected.
+                                const bool aligned = reinterpret_cast<uintptr_t>(func_start) % 16 == 0;
+                                const bool padded = func_start > seg.start && func_start[-1] == 0xCC;
+                                if (!aligned || !padded)
+                                {
+                                    UE4SS_DBG("[UE4SS] AOB scan: StaticConstructObject candidate %p rejected (aligned=%d, int3-padded=%d); use [Addresses] StaticConstructObject in UE4SS_Addresses.ini\n", static_cast<void*>(func_start), aligned, padded);
+                                    Output::send<LogLevel::Warning>(STR("StaticConstructObject AOB candidate {} rejected: not a function start; set [Addresses] StaticConstructObject in UE4SS_Addresses.ini\n"), static_cast<void*>(func_start));
+                                    continue;
+                                }
                                 found_func = func_start;
                                 UE4SS_DBG("[UE4SS] AOB scan: StaticConstructObject candidate at %p\n", found_func);
                                 break;
