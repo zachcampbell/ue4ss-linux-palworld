@@ -889,6 +889,15 @@ namespace RC
             // Start event loop
 #ifndef _WIN32
             Unreal::UObjectArray::AddUObjectDeleteListener(&s_linux_engine_shutdown_listener);
+            // palhook: the game sometimes exits without the engine shutdown path (SIGTERM handler -> exit()), so the
+            // UObject-array notification never comes and the executable's static destructors free the heap under the
+            // running loop (SIGBUS in fire_update, shadow run 110). atexit handlers run last-registered-first; this
+            // runs during the game's own startup, after the executable's static initialisers registered theirs, so
+            // it runs before them and stops the loop first.
+            {
+                static bool registered = false;
+                if (!registered) { registered = true; std::atexit([] { UE4SSProgram::unreal_is_shutting_down = true; UE4SSProgram::get_program().stop_event_loop(); UE4SS_DBG("[UE4SS] Linux: atexit: event loop stopped.\n"); }); }
+            }
 #endif
             m_event_loop = std::jthread{&UE4SSProgram::update, this};
 
@@ -3138,6 +3147,15 @@ namespace RC
             UE4SS_DBG("[UE4SS] Linux: Starting event loop (limited mode)...\n");
 #ifndef _WIN32
             Unreal::UObjectArray::AddUObjectDeleteListener(&s_linux_engine_shutdown_listener);
+            // palhook: the game sometimes exits without the engine shutdown path (SIGTERM handler -> exit()), so the
+            // UObject-array notification never comes and the executable's static destructors free the heap under the
+            // running loop (SIGBUS in fire_update, shadow run 110). atexit handlers run last-registered-first; this
+            // runs during the game's own startup, after the executable's static initialisers registered theirs, so
+            // it runs before them and stops the loop first.
+            {
+                static bool registered = false;
+                if (!registered) { registered = true; std::atexit([] { UE4SSProgram::unreal_is_shutting_down = true; UE4SSProgram::get_program().stop_event_loop(); UE4SS_DBG("[UE4SS] Linux: atexit: event loop stopped.\n"); }); }
+            }
 #endif
             m_event_loop = std::jthread{&UE4SSProgram::update, this};
             m_event_loop.join();
