@@ -14,13 +14,52 @@ namespace RC::Unreal
             }
         }
 
+        // palhook: FTopLevelAssetPath is declared with engine-side (COREUOBJECT_API) members that UE4SS never
+        // defined; the ones this port uses live here so they link alongside FSoftObjectPath.
+        bool FTopLevelAssetPath::TrySetPath(FName InPackageName, FName InAssetName)
+        {
+            PackageName = InPackageName;
+            AssetName = InAssetName;
+            return true;
+        }
+
+        FString FTopLevelAssetPath::ToString() const
+        {
+            FString Out;
+            ToString(Out);
+            return Out;
+        }
+
+        void FTopLevelAssetPath::ToString(FString& OutString) const
+        {
+            OutString.Reset();
+            AppendString(OutString);
+        }
+
+        void FTopLevelAssetPath::AppendString(FString& OutString) const
+        {
+            if (PackageName.GetComparisonIndex() == 0) return;
+            OutString += PackageName.ToFString();
+            if (AssetName.GetComparisonIndex() != 0)
+            {
+                OutString += '.';
+                OutString += AssetName.ToFString();
+            }
+        }
+
+        FName FSoftObjectPath::GetAssetPathName() const
+        {
+            if (IsNull()) return FName();
+            return FName(*AssetPath.ToString(), FNAME_Add);
+        }
+
         FString FSoftObjectPath::ToString() const
         {
             if (SubPathString.IsEmpty())
             {
                 return GetAssetPathString();
             }
-            auto AssetPathString = AssetPathName.ToFString();
+            auto AssetPathString = AssetPath.ToString();
             FString FullPathString;
             FullPathString.Reserve(AssetPathString.Len() + SubPathString.Len() + 1);
             FullPathString += AssetPathString;
@@ -29,31 +68,40 @@ namespace RC::Unreal
             return FullPathString;
         }
 
+        // "/Package/Path.AssetName[:SubPath]" -> AssetPath{/Package/Path, AssetName}, SubPathString.
+        // A path with no '.' after the last '/' is a package reference (asset name None).
         void FSoftObjectPath::SetPath(const FString& Path)
         {
             if (Path.IsEmpty() || Path == STR("None"))
             {
                 Reset();
-            }else if (ensureMsgf(!FPackageName::IsShortPackageName(*Path), TEXT("Cannot create SoftObjectPath with short package names"), Path.Len(), *Path))
+                return;
+            }
+            int32 ColonIndex;
+            FString AssetPart;
+            if (Path.FindChar(':', ColonIndex))
             {
-                // RE-UE4SS FIX (Corporalwill): [ExportTextPathToObjectPath unimplemented, would require non-array FString:Split() to be implemented]
-                /*if (Path[0] != '/')
-                {
-                    Path = FPackageName::ExportTextPathToObjectPath(Path);
-                }*/
-                // RE-UE4SS FIX END
-
-                int32 ColonIndex;
-                if (Path.FindChar(':', ColonIndex))
-                {
-                    AssetPathName = FName(*Path.Left(ColonIndex));
-                    SubPathString = Path.Mid(ColonIndex + 1);
-                }
-                else
-                {
-                    AssetPathName = FName(*Path);
-                    SubPathString.Empty();
-                }
+                AssetPart = Path.Left(ColonIndex);
+                SubPathString = Path.Mid(ColonIndex + 1);
+            }
+            else
+            {
+                AssetPart = Path;
+                SubPathString.Empty();
+            }
+            int32 LastSlash = -1, LastDot = -1;
+            for (int32 i = 0; i < AssetPart.Len(); ++i)
+            {
+                if (AssetPart[i] == '/') LastSlash = i;
+                else if (AssetPart[i] == '.') LastDot = i;
+            }
+            if (LastDot > LastSlash)
+            {
+                AssetPath.TrySetPath(FName(*AssetPart.Left(LastDot), FNAME_Add), FName(*AssetPart.Mid(LastDot + 1), FNAME_Add));
+            }
+            else
+            {
+                AssetPath.TrySetPath(FName(*AssetPart, FNAME_Add), FName());
             }
         }
 
@@ -70,7 +118,7 @@ namespace RC::Unreal
         {
             if (SubPathString.IsEmpty())
             {
-                return ResolveObjectInternal(AssetPathName.ToString().c_str());
+                return ResolveObjectInternal(*AssetPath.ToString());
             }
             else
             {

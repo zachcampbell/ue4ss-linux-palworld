@@ -33,6 +33,14 @@
 #include <Unreal/FProperty.hpp>
 #include <Unreal/Property/FNumericProperty.hpp>
 #include <Unreal/PalworldVTableBaseline_5_01.hpp>
+#include <Unreal/FSoftObjectPath.hpp>
+// palhook: nothing inside libUE4SS references FSoftObjectPath's out-of-line members, so the static archive's
+// object was dropped and C++ mods could not resolve SetPath/ToString. Referencing them here keeps them linked
+// and exported.
+namespace { [[maybe_unused]] const void* const palhook_keep_soft_path_symbols[] = {
+    reinterpret_cast<const void*>(static_cast<void (RC::Unreal::FSoftObjectPath::*)(const RC::Unreal::FString&)>(&RC::Unreal::FSoftObjectPath::SetPath) ? 1 : 0),
+    reinterpret_cast<const void*>(&RC::Unreal::FSoftObjectPath::GetCurrentTag),
+}; }
 #include <cstdlib>
 #include <Unreal/ULocalPlayer.hpp>
 #include <Unreal/Searcher/ObjectSearcher.hpp>

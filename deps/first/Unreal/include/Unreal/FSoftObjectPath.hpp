@@ -1,6 +1,7 @@
 #pragma once
 #include <Unreal/FString.hpp>
 #include <Unreal/NameTypes.hpp>
+#include <Unreal/CoreUObject/UObject/TopLevelAssetPath.hpp>
 namespace RC::Unreal
 {
     struct RC_UE_API FSoftObjectPath
@@ -21,20 +22,20 @@ namespace RC::Unreal
         FString ToString() const;
 
         /** Returns the entire asset path as an FName, including both package and asset but not sub object */
-        FORCEINLINE FName GetAssetPathName() const
-        {
-            return AssetPathName;
-        }
+        // palhook: UE 5.1 layout. The asset part is an FTopLevelAssetPath (package name + asset name, two
+        // FNames); the full-path FName of older engines is rebuilt on demand.
+        FName GetAssetPathName() const;
+        FORCEINLINE const FTopLevelAssetPath& GetAssetPath() const { return AssetPath; }
 
         /** Returns string version of asset path, including both package and asset but not sub object */
         FORCEINLINE FString GetAssetPathString() const
         {
-            if (AssetPathName.IsNone())
+            if (IsNull())
             {
                 return FString();
             }
 
-            return AssetPathName.ToFString();
+            return AssetPath.ToString();
         }
 
         /** Returns the sub path, which is often empty */
@@ -63,32 +64,32 @@ namespace RC::Unreal
         /** Resets reference to point to null */
         void Reset()
         {
-            AssetPathName = FName();
+            AssetPath = FTopLevelAssetPath();
             SubPathString.Reset();
         }
 
         /** Check if this could possibly refer to a real object, or was initialized to null */
         FORCEINLINE bool IsValid() const
         {
-            return !AssetPathName.IsNone();
+            return !IsNull();
         }
 
         /** Checks to see if this is initialized to null */
         FORCEINLINE bool IsNull() const
         {
-            return AssetPathName.IsNone();
+            return AssetPath.GetPackageName().GetComparisonIndex() == 0;
         }
 
         /** Check if this represents an asset, meaning it is not null but does not have a sub path */
         FORCEINLINE bool IsAsset() const
         {
-            return !AssetPathName.IsNone() && SubPathString.IsEmpty();
+            return !IsNull() && SubPathString.IsEmpty();
         }
 
         /** Check if this represents a sub object, meaning it has a sub path */
         FORCEINLINE bool IsSubobject() const
         {
-            return !AssetPathName.IsNone() && !SubPathString.IsEmpty();
+            return !IsNull() && !SubPathString.IsEmpty();
         }
 
         /** Code needed by FSoftObjectPtr internals */
@@ -97,8 +98,8 @@ namespace RC::Unreal
 
         // RE-UE4SS FIX (Martin): [Member variables must be public, because UE4SS uses them directly, and we don't want to break API]
     public:
-        /** Asset path, patch to a top level object in a package. This is /package/path.assetname */
-        FName AssetPathName;
+        /** Asset path (UE 5.1): package name and asset name as two FNames. Offset 0, size 16. */
+        FTopLevelAssetPath AssetPath;
 
         /** Optional FString for subobject within an asset. This is the sub path after the : */
         FString SubPathString;
