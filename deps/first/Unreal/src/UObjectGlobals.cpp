@@ -765,8 +765,10 @@ namespace RC::Unreal::UObjectGlobals
                     if (ObjectItem->IsUnreachable()) { return; }
                     uintptr_t obj_addr = reinterpret_cast<uintptr_t>(Object);
                     if (obj_addr < 0x7e0000000000 || obj_addr > 0x7fffffffffff) { return; }
-                    int32_t item_flags = *reinterpret_cast<int32_t*>(reinterpret_cast<uint8_t*>(ObjectItem) + 0x8);
-                    if (item_flags == 0) { return; }
+                    // palhook: the port skipped items whose internal flags are zero as "stale". Zero is the
+                    // normal state of a live, reachable, non-rooted object (the game instance, most runtime
+                    // objects), so that filter hid them from every UE4SS enumeration (shadow runs 55 to 58).
+                    // Unreachable and null are already handled above; the pointer-range check stays.
                     GUOBJECTARRAY_PROFILE_ITER_COUNT()
                     iter_action = Callable(Object, ChunkIndex, ItemIndex);
                 });
