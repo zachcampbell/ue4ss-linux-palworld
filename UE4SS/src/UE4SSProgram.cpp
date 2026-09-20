@@ -58,46 +58,103 @@
 #include <elf.h>
 
 #ifdef __linux__
-// GMalloc walk (palhook): the game exports operator new (_Znwm) as a thin thunk into
-// FMemory::Malloc, whose first memory load is `mov rdi|rax, [rip+disp32]` of GMalloc
-// (FMalloc**). Following the thunk and decoding that load names the real global without
-// guessing from BSS contents. Verified on PalServer-Linux-Shipping v1.0.5.102999:
-// _Znwm 0x6f686e0 -> FMemory::Malloc 0x7810c20 -> GMalloc 0xc07f6a8.
+#include <Zydis/Zydis.h>
+// GMalloc resolver (palhook). The game exports operator new (_Znwm) as a thunk into FMemory::Malloc, whose
+// body loads GMalloc (FMalloc**) rip-relative and dispatches through the allocator's vtable. This decodes
+// real instruction boundaries with Zydis, takes the first 64-bit rip-relative MOV load in FMemory::Malloc,
+// requires an indirect JMP/CALL to follow it (the vtable dispatch), and validates the mappings: GMalloc in a
+// writable PT_LOAD of the main executable, the instance non-null, its vtable in a read-only PT_LOAD, and
+// vtable slot 3 (Malloc on this ABI) in an executable one. Verified on PalServer-Linux-Shipping
+// v1.0.5.102999: _Znwm 0x6f686e0 -> FMemory::Malloc 0x7810c20 -> GMalloc 0xc07f6a8. There is no fallback:
+// an unverified allocator is worse than no mods.
+namespace
+{
+    struct ExeSegments { std::vector<std::pair<uintptr_t, uintptr_t>> writable, readonly, exec; };
+    ExeSegments collect_exe_segments()
+    {
+        ExeSegments segs;
+        dl_iterate_phdr([](struct dl_phdr_info* info, size_t, void* data) -> int {
+            if (info->dlpi_name && info->dlpi_name[0] != '\0') return 0; // main executable only
+            auto* out = static_cast<ExeSegments*>(data);
+            for (int i = 0; i < info->dlpi_phnum; ++i)
+            {
+                const ElfW(Phdr)* ph = &info->dlpi_phdr[i];
+                if (ph->p_type != PT_LOAD) continue;
+                uintptr_t lo = info->dlpi_addr + ph->p_vaddr, hi = lo + ph->p_memsz;
+                if (ph->p_flags & PF_W) out->writable.emplace_back(lo, hi);
+                else if (ph->p_flags & PF_X) out->exec.emplace_back(lo, hi);
+                else out->readonly.emplace_back(lo, hi);
+            }
+            return 0;
+        }, &segs);
+        return segs;
+    }
+    bool in_segments(const std::vector<std::pair<uintptr_t, uintptr_t>>& v, uintptr_t a)
+    {
+        for (auto& [lo, hi] : v) if (a >= lo && a < hi) return true;
+        return false;
+    }
+}
 static void* ue4ss_resolve_gmalloc_from_operator_new(char* why, size_t why_len)
 {
-    auto* p = static_cast<uint8_t*>(dlsym(RTLD_DEFAULT, "_Znwm"));
-    if (!p) { snprintf(why, why_len, "_Znwm not exported"); return nullptr; }
-    uint8_t* target = nullptr;
-    for (size_t off = 0; off < 32;)
+    auto* op_new = static_cast<uint8_t*>(dlsym(RTLD_DEFAULT, "_Znwm"));
+    if (!op_new) { snprintf(why, why_len, "_Znwm is not exported by the game"); return nullptr; }
+    const ExeSegments segs = collect_exe_segments();
+    if (!in_segments(segs.exec, reinterpret_cast<uintptr_t>(op_new))) { snprintf(why, why_len, "_Znwm %p is not in the main executable's text", static_cast<void*>(op_new)); return nullptr; }
+
+    ZydisDecoder decoder;
+    ZydisDecoderInit(&decoder, ZYDIS_MACHINE_MODE_LONG_64, ZYDIS_STACK_WIDTH_64);
+    ZydisDecodedInstruction insn;
+    ZydisDecodedOperand ops[ZYDIS_MAX_OPERAND_COUNT];
+
+    // 1. Follow the thunk: straight-line code ending in a direct JMP.
+    uintptr_t ip = reinterpret_cast<uintptr_t>(op_new), target = 0;
+    for (int n = 0; n < 16; ++n)
     {
-        const uint8_t* i = p + off;
-        if (i[0] == 0xE9) { int32_t rel; memcpy(&rel, i + 1, 4); target = p + off + 5 + rel; break; }
-        if (i[0] == 0xEB) { target = p + off + 2 + static_cast<int8_t>(i[1]); break; }
-        if (i[0] == 0x48 && i[1] == 0x85 && i[2] == 0xFF) { off += 3; continue; }                  // test rdi,rdi
-        if (i[0] == 0xB8 || i[0] == 0xBE) { off += 5; continue; }                                  // mov eax|esi, imm32
-        if (i[0] == 0x48 && i[1] == 0x0F && i[2] == 0x44 && i[3] == 0xF8) { off += 4; continue; }  // cmove rdi,rax
-        snprintf(why, why_len, "unrecognised byte %02x at _Znwm+%zu", i[0], off);
-        return nullptr;
-    }
-    if (!target) { snprintf(why, why_len, "no jmp within 32 bytes of _Znwm"); return nullptr; }
-    for (size_t off = 0; off < 64; ++off)
-    {
-        const uint8_t* i = target + off;
-        if (i[0] == 0x48 && i[1] == 0x8B && (i[2] & 0xC7) == 0x05)  // mov r64, [rip+disp32]
+        if (!ZYAN_SUCCESS(ZydisDecoderDecodeFull(&decoder, reinterpret_cast<const void*>(ip), 16, &insn, ops))) { snprintf(why, why_len, "undecodable instruction at _Znwm+%#lx", ip - reinterpret_cast<uintptr_t>(op_new)); return nullptr; }
+        if (insn.mnemonic == ZYDIS_MNEMONIC_JMP && ops[0].type == ZYDIS_OPERAND_TYPE_IMMEDIATE)
         {
-            int32_t disp; memcpy(&disp, i + 3, 4);
-            uint8_t* g = target + off + 7 + disp;
-            void* instance = *reinterpret_cast<void**>(g);
-            if (!instance) { snprintf(why, why_len, "GMalloc %p is still null", static_cast<void*>(g)); return nullptr; }
-            void* vtable = *static_cast<void**>(instance);
-            if (!vtable) { snprintf(why, why_len, "GMalloc %p instance %p has null vtable", static_cast<void*>(g), instance); return nullptr; }
-            snprintf(why, why_len, "_Znwm %p -> FMemory::Malloc %p -> GMalloc %p (instance %p, vtable %p)",
-                     static_cast<void*>(p), static_cast<void*>(target), static_cast<void*>(g), instance, vtable);
-            return g;
+            ZyanU64 abs = 0;
+            if (!ZYAN_SUCCESS(ZydisCalcAbsoluteAddress(&insn, &ops[0], ip, &abs))) { snprintf(why, why_len, "cannot resolve jmp target in _Znwm"); return nullptr; }
+            target = static_cast<uintptr_t>(abs); break;
         }
+        if (insn.mnemonic == ZYDIS_MNEMONIC_RET || insn.mnemonic == ZYDIS_MNEMONIC_CALL || insn.meta.category == ZYDIS_CATEGORY_COND_BR) { snprintf(why, why_len, "_Znwm is not a plain thunk (%s at +%#lx)", ZydisMnemonicGetString(insn.mnemonic), ip - reinterpret_cast<uintptr_t>(op_new)); return nullptr; }
+        ip += insn.length;
     }
-    snprintf(why, why_len, "no rip-relative load within 64 bytes of FMemory::Malloc %p", static_cast<void*>(target));
-    return nullptr;
+    if (!target) { snprintf(why, why_len, "no direct jmp within 16 instructions of _Znwm"); return nullptr; }
+    if (!in_segments(segs.exec, target)) { snprintf(why, why_len, "_Znwm jumps outside the executable's text (%#lx)", target); return nullptr; }
+
+    // 2. In FMemory::Malloc: first 64-bit rip-relative MOV load, then an indirect JMP/CALL (vtable dispatch).
+    uintptr_t gmalloc = 0; bool dispatch = false; ip = target;
+    for (int n = 0; n < 40 && !dispatch; ++n)
+    {
+        if (!ZYAN_SUCCESS(ZydisDecoderDecodeFull(&decoder, reinterpret_cast<const void*>(ip), 16, &insn, ops))) { snprintf(why, why_len, "undecodable instruction in FMemory::Malloc at %#lx", ip); return nullptr; }
+        if (!gmalloc && insn.mnemonic == ZYDIS_MNEMONIC_MOV && ops[0].type == ZYDIS_OPERAND_TYPE_REGISTER && ops[1].type == ZYDIS_OPERAND_TYPE_MEMORY
+            && ops[1].mem.base == ZYDIS_REGISTER_RIP && ops[1].size == 64)
+        {
+            ZyanU64 abs = 0;
+            if (ZYAN_SUCCESS(ZydisCalcAbsoluteAddress(&insn, &ops[1], ip, &abs))) gmalloc = static_cast<uintptr_t>(abs);
+        }
+        else if (gmalloc && (insn.mnemonic == ZYDIS_MNEMONIC_JMP || insn.mnemonic == ZYDIS_MNEMONIC_CALL) && ops[0].type != ZYDIS_OPERAND_TYPE_IMMEDIATE)
+        {
+            dispatch = true;
+        }
+        else if (insn.mnemonic == ZYDIS_MNEMONIC_RET && gmalloc) { break; }
+        ip += insn.length;
+    }
+    if (!gmalloc) { snprintf(why, why_len, "no rip-relative 64-bit load within 40 instructions of FMemory::Malloc %#lx", target); return nullptr; }
+    if (!dispatch) { snprintf(why, why_len, "no indirect jmp/call after the GMalloc load in FMemory::Malloc %#lx", target); return nullptr; }
+
+    // 3. Validate the mappings and the object shape.
+    if (!in_segments(segs.writable, gmalloc)) { snprintf(why, why_len, "candidate GMalloc %#lx is not in a writable segment of the executable", gmalloc); return nullptr; }
+    uintptr_t instance = *reinterpret_cast<uintptr_t*>(gmalloc);
+    if (!instance) { snprintf(why, why_len, "GMalloc %#lx is still null", gmalloc); return nullptr; }
+    uintptr_t vtable = *reinterpret_cast<uintptr_t*>(instance);
+    if (!in_segments(segs.readonly, vtable)) { snprintf(why, why_len, "GMalloc %#lx instance %#lx vtable %#lx is not in a read-only segment", gmalloc, instance, vtable); return nullptr; }
+    uintptr_t slot3 = reinterpret_cast<uintptr_t*>(vtable)[3];
+    if (!in_segments(segs.exec, slot3)) { snprintf(why, why_len, "allocator vtable %#lx slot 3 (%#lx) is not executable", vtable, slot3); return nullptr; }
+    snprintf(why, why_len, "_Znwm %p -> FMemory::Malloc %#lx -> GMalloc %#lx (instance %#lx, vtable %#lx, slot3 %#lx)", static_cast<void*>(op_new), target, gmalloc, instance, vtable, slot3);
+    return reinterpret_cast<void*>(gmalloc);
 }
 #endif
 #include <cstring>
@@ -1826,10 +1883,9 @@ namespace RC
                 // where the second pointer is in a writable segment (the FMalloc instance).
                 config.ScanOverrides.fmemory_free = [&](std::vector<SignatureContainer>&, Unreal::Signatures::ScanResult& scan_result) {
                     void* addr = try_resolve("GMalloc");
-
                     if (!addr)
                     {
-                        char why[256] = {};
+                        char why[320] = {};
                         addr = ue4ss_resolve_gmalloc_from_operator_new(why, sizeof why);
                         if (addr)
                         {
@@ -1838,184 +1894,18 @@ namespace RC
                         }
                         else
                         {
-                            UE4SS_DBG("[UE4SS] GMalloc operator-new walk failed (%s); falling back\n", why);
-                            Output::send<LogLevel::Warning>(STR("GMalloc operator-new walk failed: {}\n"), ensure_str(why));
+                            // No fallback on purpose: FMemory routes every allocation through this pointer.
+                            std::string msg = std::string("GMalloc resolver failed (") + why + "); refusing to initialize with an unverified allocator";
+                            UE4SS_DBG("[UE4SS] %s\n", msg.c_str());
+                            Output::send<LogLevel::Error>(STR("{}\n"), ensure_str(msg));
+                            throw std::runtime_error{msg};
                         }
-                    }
-
-                    if (!addr)
-                    {
-                        UE4SS_DBG("[UE4SS] dlsym: GMalloc not found, trying heuristic scan...\n");
-
-                        struct WritableSeg { uint8_t* start; size_t size; };
-                        std::vector<WritableSeg> writable_segments;
-
-                        // Collect writable PT_LOAD segments from the main executable only.
-                        // The main exe has dlpi_name="" (empty). Shared libraries have a path.
-                        dl_iterate_phdr([](struct dl_phdr_info* info, size_t, void* data) -> int {
-                            auto* segs = static_cast<std::vector<WritableSeg>*>(data);
-                            const char* name = info->dlpi_name;
-                            // Skip shared libraries (only process main exe with empty name)
-                            if (name && name[0] != '\0') return 0;
-                            for (int i = 0; i < info->dlpi_phnum; i++) {
-                                const ElfW(Phdr)* phdr = &info->dlpi_phdr[i];
-                                if (phdr->p_type != PT_LOAD) continue;
-                                if (!(phdr->p_flags & PF_W)) continue;
-                                uint8_t* seg_start = reinterpret_cast<uint8_t*>(info->dlpi_addr + phdr->p_vaddr);
-                                size_t seg_size = phdr->p_memsz;
-                                if (seg_size > 0x100) segs->push_back({seg_start, seg_size});
-                            }
-                            return 0;
-                        }, &writable_segments);
-
-                        // Also add the anonymous BSS region from /proc/self/maps.
-                        // On Linux PIE, BSS is the zero-filled tail of the last PT_LOAD
-                        // segment, but /proc/self/maps reports it as a separate anonymous
-                        // region. This is where GMalloc lives.
-                        {
-                            FILE* maps = fopen("/proc/self/maps", "r");
-                            if (maps) {
-                                char line[512];
-                                // Track the exe's last writable file-backed segment end.
-                                // BSS starts immediately after it.
-                                uintptr_t exe_data_end = 0;
-                                // First pass: find the exe's data segment end
-                                FILE* maps2 = fopen("/proc/self/maps", "r");
-                                if (maps2) {
-                                    char line2[512];
-                                    while (fgets(line2, sizeof(line2), maps2)) {
-                                        if (!strstr(line2, "PalServer")) continue;
-                                        if (!strstr(line2, "rw-p")) continue;
-                                        uintptr_t s, e;
-                                        if (sscanf(line2, "%lx-%lx", &s, &e) == 2) {
-                                            if (e > exe_data_end) exe_data_end = e;
-                                        }
-                                    }
-                                    fclose(maps2);
-                                }
-                                // Second pass: add only the FIRST anonymous writable region
-                                // after the exe's data segment (this is BSS)
-                                rewind(maps);
-                                while (fgets(line, sizeof(line), maps)) {
-                                    if (strstr(line, "PalServer")) continue;
-                                    uintptr_t start = 0, end = 0;
-                                    char perms[8] = {};
-                                    if (sscanf(line, "%lx-%lx %7s", &start, &end, perms) != 3) continue;
-                                    if (!strchr(perms, 'w') || strchr(perms, 'x')) continue;
-                                    // Only the first anonymous region after the exe data segment
-                                    if (start < exe_data_end) continue;
-                                    size_t size = end - start;
-                                    if (size <= 0x100) continue;
-                                    UE4SS_DBG("[UE4SS] GMalloc heuristic: BSS region 0x%lx-0x%lx (%zu bytes)\n", (unsigned long)start, (unsigned long)end, size);
-                                    writable_segments.push_back({reinterpret_cast<uint8_t*>(start), size});
-                                    break; // Only take the first one (BSS)
-                                }
-                                fclose(maps);
-                            }
-                        }
-
-                        // Build a set of writable address ranges for validation
-                        struct AddrRange { uintptr_t start; uintptr_t end; };
-                        std::vector<AddrRange> writable_ranges;
-                        for (const auto& seg : writable_segments)
-                        {
-                            writable_ranges.push_back({reinterpret_cast<uintptr_t>(seg.start),
-                                                       reinterpret_cast<uintptr_t>(seg.start) + seg.size});
-                        }
-
-                        auto is_writable = [&writable_ranges](uintptr_t ptr) -> bool {
-                            for (const auto& range : writable_ranges) {
-                                if (ptr >= range.start && ptr < range.end) return true;
-                            }
-                            return false;
-                        };
-
-                        // GMalloc is FMalloc** — a pointer in .data/.bss pointing to a FMalloc*
-                        // The FMalloc instance lives on the heap (or in .data/.bss).
-                        // Its first field is a vtable pointer pointing into a read-only segment.
-                        // The vtable's first few entries are function pointers in the text segment.
-                        //
-                        // Validation chain:
-                        //   GMalloc (in writable seg) -> FMalloc* (anywhere)
-                        //   -> *FMalloc (vtable ptr, in read-only seg)
-                        //   -> vtable[2] (first real virtual function, in text segment, not a stub)
-                        //
-                        // We check vtable[2] because in the Itanium ABI, vtable[0] and [1]
-                        // are destructors. The first real virtual function (Malloc or similar)
-                        // is at index 2.
-                        void* found_addr = nullptr;
-
-                        // Build a comprehensive list of ALL readable segments
-                        // (RO data, text, heap, BSS, mapped files) from /proc/self/maps.
-                        // This is needed because the FMalloc instance lives on the heap
-                        // (not in the main exe's segments).
-                        struct AccessSeg { uintptr_t start; uintptr_t end; };
-                        std::vector<AccessSeg> all_readable;
-                        {
-                            FILE* maps_all = fopen("/proc/self/maps", "r");
-                            if (maps_all) {
-                                char line3[512];
-                                while (fgets(line3, sizeof(line3), maps_all)) {
-                                    uintptr_t s, e;
-                                    char perms[8] = {};
-                                    if (sscanf(line3, "%lx-%lx %7s", &s, &e, perms) != 3) continue;
-                                    if (!strchr(perms, 'r')) continue;
-                                    all_readable.push_back({s, e});
-                                }
-                                fclose(maps_all);
-                            }
-                        }
-                        auto is_accessible = [&all_readable](uintptr_t ptr) -> bool {
-                            for (const auto& seg : all_readable) {
-                                if (ptr >= seg.start && ptr < seg.end) return true;
-                            }
-                            return false;
-                        };
-
-                        // Scan BSS for the GMalloc (FMalloc**) chain:
-                        //   GMalloc -> FMalloc* -> instance -> vtable
-                        // We use the vtable no-op pattern (31 C0 C3 at vtable[2]) as a filter.
-                        // Note: On Linux, UE4SS uses SystemMalloc for its own containers
-                        // (see FMemory::Malloc), so the GMalloc pointer is only needed
-                        // for the GMalloc null-check guard, not for actual allocation.
-                        for (const auto& seg : writable_segments)
-                        {
-                            for (size_t offset = 0; offset + 8 <= seg.size; offset += 8)
-                            {
-                                uintptr_t first_ptr = *reinterpret_cast<uintptr_t*>(seg.start + offset);
-                                if (first_ptr < 0x10000 || first_ptr > 0x7fffffffffff) continue;
-                                if (!is_accessible(first_ptr)) continue;
-                                uintptr_t instance = *reinterpret_cast<uintptr_t*>(first_ptr);
-                                if (instance < 0x10000 || instance > 0x7fffffffffff) continue;
-                                if (!is_accessible(instance)) continue;
-                                uintptr_t vtable = *reinterpret_cast<uintptr_t*>(instance);
-                                if (!is_accessible(vtable)) continue;
-                                // Quick check: vtable[2] must be no-op (31 C0 C3)
-                                uintptr_t fn2 = *reinterpret_cast<uintptr_t*>(vtable + 0x10);
-                                if (!is_accessible(fn2)) continue;
-                                uint8_t* fb2 = reinterpret_cast<uint8_t*>(fn2);
-                                if (fb2[0] != 0x31 || fb2[1] != 0xC0 || fb2[2] != 0xC3) continue;
-                                // vtable[3] must be a real function (not a stub)
-                                uintptr_t fn3 = *reinterpret_cast<uintptr_t*>(vtable + 0x18);
-                                if (!is_accessible(fn3)) continue;
-                                uint8_t fb3 = *reinterpret_cast<uint8_t*>(fn3);
-                                if (fb3 == 0xE9 || fb3 == 0xCC) continue;
-                                found_addr = seg.start + offset;
-                                UE4SS_DBG("[UE4SS] Heuristic scan: GMalloc at %p (instance %p, vtable %p)\n",
-                                          found_addr, (void*)instance, (void*)vtable);
-                                break;
-                            }
-                            if (found_addr) break;
-                        }
-
-                        if (found_addr) addr = found_addr;
-                        else UE4SS_DBG("[UE4SS] Heuristic scan: GMalloc not found\n");
                     }
 
                     if (addr)
                     {
                         Unreal::GMalloc = std::bit_cast<Unreal::FMalloc**>(addr);
-                        scan_result.SuccessMessage.emplace_back(STR("GMalloc found via dlsym/heuristic scan"));
+                        scan_result.SuccessMessage.emplace_back(STR("GMalloc found via dlsym/operator-new walk"));
 #ifdef __linux__
                         // On Linux (Itanium ABI), the FMalloc vtable layout may differ
                         // from the UE4SS default. The default has Malloc at offset 0x10
@@ -2025,10 +1915,11 @@ namespace RC
                         // and vtable[3] is a real function.
                         if (*Unreal::GMalloc)
                         {
-                            // GMalloc is FMalloc**. Chain: *GMalloc -> FMalloc* -> instance.
-                            // The instance's first field is the vtable.
-                            uintptr_t fmalloc_ptr = reinterpret_cast<uintptr_t>(*Unreal::GMalloc);
-                            uintptr_t fmalloc_obj = *reinterpret_cast<uintptr_t*>(fmalloc_ptr);
+                            // GMalloc is FMalloc**: *GMalloc is the allocator instance and the
+                            // instance's first field is its vtable (palhook: the earlier version
+                            // dereferenced one level too deep, which only "worked" for the
+                            // wrong-shaped global the BSS heuristic used to find).
+                            uintptr_t fmalloc_obj = reinterpret_cast<uintptr_t>(*Unreal::GMalloc);
                             uintptr_t vtable = *reinterpret_cast<uintptr_t*>(fmalloc_obj);
                             // Check if vtable[2] (offset 0x10) is a no-op (xor eax,eax; ret = 31 C0 C3)
                             uintptr_t fn_0x10 = *reinterpret_cast<uintptr_t*>(vtable + 0x10);

@@ -1126,23 +1126,31 @@ namespace RC::Unreal::UnrealInitializer
                 // 0x18, Free 0x38). Applied to exactly those maps. AActor and AGameModeBase keep
                 // their audited entries below (also baseline +8); UEngine is left alone because
                 // its Tick at 0x2F0 is soak-proven and 0x2F8 crashes as Tick.
-                auto shift_map = [](auto& map, const CharType* name) {
-                    size_t shifted = 0;
-                    for (auto& [key, offset] : map)
+                // Precondition, so a custom or already-corrected map is never shifted twice: one sentinel
+                // entry per map must still hold its untouched 5.1 baseline value. Maps that are empty on this
+                // build (UClass has no 5.1 body wired in) are reported and left alone.
+                auto shift_map = [](auto& map, const CharType* name, const CharType* sentinel, uint32_t baseline) {
+                    if (map.empty()) { Output::send<LogLevel::Warning>(STR("Palworld vtable override: {} map is empty, nothing to shift\n"), name); return; }
+                    auto it = map.find(sentinel);
+                    if (it == map.end() || it->second != baseline)
                     {
-                        if (offset != 0) { offset += 8; ++shifted; }
+                        Output::send<LogLevel::Error>(STR("Palworld vtable override: {} sentinel {} is {:#x}, expected baseline {:#x}; map left untouched\n"),
+                                                      name, sentinel, it == map.end() ? 0u : it->second, baseline);
+                        return;
                     }
-                    Output::send(STR("Palworld vtable override: {} entries of {} shifted +8 from the 5.1 baseline\n"), shifted, name);
+                    size_t shifted = 0;
+                    for (auto& [key, offset] : map) { if (offset != 0) { offset += 8; ++shifted; } }
+                    Output::send(STR("Palworld vtable override: {} entries of {} shifted +8 from the 5.1 baseline (sentinel {} {:#x} -> {:#x})\n"), shifted, name, sentinel, baseline, baseline + 8);
                 };
-                shift_map(UObject::VTableLayoutMap, STR("UObject"));
-                shift_map(UField::VTableLayoutMap, STR("UField"));
-                shift_map(UStruct::VTableLayoutMap, STR("UStruct"));
-                shift_map(UClass::VTableLayoutMap, STR("UClass"));
-                shift_map(UScriptStruct::ICppStructOps::VTableLayoutMap, STR("UScriptStruct::ICppStructOps"));
-                shift_map(UDataTable::VTableLayoutMap, STR("UDataTable"));
-                shift_map(FField::VTableLayoutMap, STR("FField"));
-                shift_map(FProperty::VTableLayoutMap, STR("FProperty"));
-                shift_map(FNumericProperty::VTableLayoutMap, STR("FNumericProperty"));
+                shift_map(UObject::VTableLayoutMap, STR("UObject"), STR("ProcessEvent"), 0x260);
+                shift_map(UField::VTableLayoutMap, STR("UField"), STR("AddCppProperty"), 0x2B0);
+                shift_map(UStruct::VTableLayoutMap, STR("UStruct"), STR("InitializeStruct"), 0x2F8);
+                shift_map(UClass::VTableLayoutMap, STR("UClass"), STR("GetAuthoritativeClass"), 0x360);
+                shift_map(UScriptStruct::ICppStructOps::VTableLayoutMap, STR("UScriptStruct::ICppStructOps"), STR("Construct"), 0x10);
+                shift_map(UDataTable::VTableLayoutMap, STR("UDataTable"), STR("GetNonConstRowMap"), 0x2B0);
+                shift_map(FField::VTableLayoutMap, STR("FField"), STR("Serialize"), 0x8);
+                shift_map(FProperty::VTableLayoutMap, STR("FProperty"), STR("GetMinAlignment"), 0x148);
+                shift_map(FNumericProperty::VTableLayoutMap, STR("FNumericProperty"), STR("IsFloatingPoint"), 0x168);
 
                 // AActor: the tick-prerequisite adapter thunks at 0x378/0x380
                 // (passing this+0x28 = PrimaryActorTick, arg+0x28/0x30 = actor vs
