@@ -2664,7 +2664,10 @@ namespace RC
 
                             auto try_get_address = [&](const File::CharType* section_name, const File::CharType* key_name) -> void* {
                                 try {
-                                    const auto& val = parser.get_string(section_name, key_name);
+                                    // palhook: the throwing get_string overload aborts the process on this build (a throw
+                                    // inside libUE4SS lands in libsteam_api's __cxa_throw), so use the defaulted lookup.
+                                    static const File::StringType no_value{};
+                                    const auto val = parser.get_string(section_name, key_name, no_value);
                                     if (val.empty()) return nullptr;
                                     // Convert File::StringType (u16string on Linux) to std::string for parsing
                                     std::string addr_str;
