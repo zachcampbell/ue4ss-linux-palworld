@@ -788,7 +788,10 @@ namespace RC
             // current iteration; the destructor's bounded wait covers the rest.
             UE4SSProgram::unreal_is_shutting_down = true;
             UE4SSProgram::get_program().request_event_loop_stop();
-            UE4SS_DBG("[UE4SS] Linux: UObject array shutting down; event loop stop requested.\n");
+            // The engine checks that every delete listener unregistered itself during this notification
+            // ("All UObject delete listeners should be unregistered when shutting down", fatal: run 101).
+            Unreal::UObjectArray::RemoveUObjectDeleteListener(this);
+            UE4SS_DBG("[UE4SS] Linux: UObject array shutting down; event loop stop requested, listener removed.\n");
         }
     };
     static FLinuxEngineShutdownListener s_linux_engine_shutdown_listener{};
