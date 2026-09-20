@@ -230,6 +230,7 @@ static void* ue4ss_resolve_gmalloc_from_operator_new(char* why, size_t why_len)
 extern "C" bool ue4ss_with_crash_recovery(const std::function<void()>& func);
 extern "C" bool ue4ss_with_iter_recovery(const std::function<void()>& func);
 extern "C" bool ue4ss_with_alloc_recovery(const std::function<void()>& func);
+extern "C" void ue4ss_abort_init(const char* reason);
 #endif
 
 namespace RC
@@ -1928,7 +1929,7 @@ namespace RC
                             std::string msg = std::string("GMalloc resolver failed (") + why + "); refusing to initialize with an unverified allocator";
                             UE4SS_DBG("[UE4SS] %s\n", msg.c_str());
                             Output::send<LogLevel::Error>(STR("{}\n"), ensure_str(msg));
-                            throw std::runtime_error{msg};
+                            ue4ss_abort_init(msg.c_str());
                         }
                     }
 

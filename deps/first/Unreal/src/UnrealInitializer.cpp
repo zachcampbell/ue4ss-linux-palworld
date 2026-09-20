@@ -33,6 +33,8 @@
 #include <Unreal/FProperty.hpp>
 #include <Unreal/Property/FNumericProperty.hpp>
 #include <Unreal/PalworldVTableBaseline_5_01.hpp>
+#include <cstdlib>
+extern "C" void ue4ss_abort_init(const char* reason);
 #include <Unreal/ULocalPlayer.hpp>
 #include <Unreal/Searcher/ObjectSearcher.hpp>
 #include <Unreal/ClassListener.hpp>
@@ -1161,12 +1163,19 @@ namespace RC::Unreal::UnrealInitializer
                         Output::send(STR("Palworld vtable override: {} already holds baseline+8 ({} entries), left as is\n"), name, corrected);
                         return;
                     }
-                    auto msg = fmt::format(STR("Palworld vtable override: {} does not match the 5.1 baseline ({} of {} baseline entries, {} already +8, {} unknown keys); refusing to guess a vtable layout. Remove custom VTableLayout entries for this class or update the baseline."),
-                                           name, matched, present, corrected, extra);
+                    StringType unknown;
+                    for (auto& [key, offset] : map) { if (offset == 0) continue; bool known = false; for (size_t i = 0; i < n; ++i) if (key == base[i].name) { known = true; break; } if (!known && unknown.size() < 1500) unknown += fmt::format(STR(" {}={:#x}"), key, offset); }
+                    auto msg = fmt::format(STR("Palworld vtable override: {} does not match the 5.1 baseline ({} of {} baseline entries, {} already +8, {} unknown keys:{}); refusing to guess a vtable layout. Remove custom VTableLayout entries for this class or update the baseline."),
+                                           name, matched, present, corrected, extra, unknown);
                     Output::send<LogLevel::Error>(STR("{}\n"), msg);
-                    throw std::runtime_error{to_string(msg)};
+                    ue4ss_abort_init(to_string(msg).c_str());
                 };
-                shift_map(UObject::VTableLayoutMap, STR("UObject"), kVt_UObject, std::size(kVt_UObject));
+                // UGameViewportClient declares no map of its own in this port, so its 5.1 body lands in
+                // UObject's map; the baseline for that map is the union of the two tables.
+                std::vector<VtBaseline> uobject_baseline(std::begin(kVt_UObject), std::end(kVt_UObject));
+                uobject_baseline.insert(uobject_baseline.end(), std::begin(kVt_UGameViewportClient), std::end(kVt_UGameViewportClient));
+                if (std::getenv("UE4SS_PALHOOK_FORCE_LAYOUT_MISMATCH")) UObject::VTableLayoutMap[STR("PalhookForcedMismatch")] = 0x8; // test hook for the refusal path
+                shift_map(UObject::VTableLayoutMap, STR("UObject"), uobject_baseline.data(), uobject_baseline.size());
                 shift_map(UField::VTableLayoutMap, STR("UField"), kVt_UField, std::size(kVt_UField));
                 shift_map(UStruct::VTableLayoutMap, STR("UStruct"), kVt_UStruct, std::size(kVt_UStruct));
                 shift_map(UClass::VTableLayoutMap, STR("UClass"), kVt_UClass, std::size(kVt_UClass));

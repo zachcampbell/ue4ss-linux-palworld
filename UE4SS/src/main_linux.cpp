@@ -1,3 +1,4 @@
+#include <cstdlib>
 // ===========================================================================
 // UE4SS Linux Native Port
 // Copyright (c) 2026 rl-dev.de (https://rl-dev.de)
@@ -99,6 +100,18 @@ static thread_local sigjmp_buf s_alloc_jmpbuf;
 static thread_local bool s_has_alloc_jmpbuf = false;
 static struct sigaction s_old_sigsegv;
 static struct sigaction s_old_sigbus;
+
+// Deliberate init abort (palhook): used when a precondition proves the allocator or a vtable layout
+// unverified. Lands on the same recovery point as a crash during init, without a C++ throw, because
+// __cxa_throw resolves to libsteam_api's variant in this process and faults.
+static const int kUE4SSInitAborted = 1000;
+extern "C" void ue4ss_abort_init(const char* reason)
+{
+    UE4SS_ERR("[UE4SS] init aborted: %s\n", reason ? reason : "");
+    if (s_has_jmpbuf) siglongjmp(s_init_jmpbuf, kUE4SSInitAborted);
+    UE4SS_ERR("[UE4SS] init abort requested outside the init recovery scope; raising SIGABRT\n");
+    abort();
+}
 
 static void ue4ss_sigsegv_handler(int sig, siginfo_t* info, void* ucontext)
 {
@@ -330,7 +343,8 @@ static auto thread_dll_start() -> void
         int sig = sigsetjmp(s_init_jmpbuf, 1);
         if (sig != 0)
         {
-            UE4SS_ERR("[UE4SS] Recovered from signal %d. UE4SS init failed but game should continue.\n", sig);
+            if (sig == kUE4SSInitAborted) UE4SS_ERR("[UE4SS] init aborted deliberately (see reason above); no mods started, game continues.\n");
+            else UE4SS_ERR("[UE4SS] Recovered from signal %d. UE4SS init failed but game should continue.\n", sig);
             s_has_jmpbuf = false;
             restore_signal_handlers();
             return;
