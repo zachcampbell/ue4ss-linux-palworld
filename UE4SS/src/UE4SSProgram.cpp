@@ -773,6 +773,33 @@ namespace RC
         }
     }
 
+#ifndef _WIN32
+    // palhook: on Linux the game's exit runs while the UE4SS event loop thread is still calling every mod's
+    // on_update; the mod objects live in the game heap, which is unmapped during exit (SIGBUS/SIGSEGV in
+    // CppMod::fire_update on a shutdown after a play session, shadow runs 96 and 97). The engine notifies UObject
+    // array listeners from UObjectBaseShutdown() early in exit, before the allocator goes; stop the loop there.
+    struct FLinuxEngineShutdownListener final : public Unreal::FUObjectDeleteListener
+    {
+        void NotifyUObjectDeleted(const Unreal::UObjectBase*, int32_t) override {}
+        void OnUObjectArrayShutdown() override
+        {
+            UE4SSProgram::unreal_is_shutting_down = true;
+            UE4SSProgram::get_program().stop_event_loop();
+            UE4SS_DBG("[UE4SS] Linux: UObject array shutting down; event loop stopped.\n");
+        }
+    };
+    static FLinuxEngineShutdownListener s_linux_engine_shutdown_listener{};
+#endif
+
+    auto UE4SSProgram::stop_event_loop() -> void
+    {
+        m_processing_events = false;
+        if (m_event_loop.joinable() && m_event_loop.get_id() != std::this_thread::get_id())
+        {
+            m_event_loop.join();
+        }
+    }
+
     UE4SSProgram::~UE4SSProgram()
     {
         // Shut down the event loop
@@ -784,10 +811,7 @@ namespace RC
         // body, so without a join the loop can read a CppUserModBase that ~CppMod just freed (SIGBUS in
         // CppMod::fire_update at shutdown after a play session, shadow run 96). Wait for the loop to observe the
         // flag and leave before anything it touches is torn down. Skipped if we somehow run on that thread.
-        if (m_event_loop.joinable() && m_event_loop.get_id() != std::this_thread::get_id())
-        {
-            m_event_loop.join();
-        }
+        stop_event_loop();
 #endif
 
 #ifndef _WIN32
@@ -851,6 +875,9 @@ namespace RC
 #ifndef RUN_TESTS
             // Program is now fully setup
             // Start event loop
+#ifndef _WIN32
+            Unreal::UObjectArray::AddUObjectDeleteListener(&s_linux_engine_shutdown_listener);
+#endif
             m_event_loop = std::jthread{&UE4SSProgram::update, this};
 
             // Wait for thread
@@ -3097,6 +3124,9 @@ namespace RC
                 Unreal::UObjectArray::GetNumElements());
             // Start the event loop so the server keeps running
             UE4SS_DBG("[UE4SS] Linux: Starting event loop (limited mode)...\n");
+#ifndef _WIN32
+            Unreal::UObjectArray::AddUObjectDeleteListener(&s_linux_engine_shutdown_listener);
+#endif
             m_event_loop = std::jthread{&UE4SSProgram::update, this};
             m_event_loop.join();
             return;
