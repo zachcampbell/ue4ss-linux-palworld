@@ -439,12 +439,15 @@ static void ue4ss_linux_cleanup()
             UE4SS_DBG("[UE4SS] initialization was refused; skipping cleanup on exit.\n");
             return;
         }
-        UE4SS_DBG("[UE4SS] Cleaning up...\n");
-        UE4SSProgram::static_cleanup();
+        // palhook: this destructor runs from _dl_fini after the game's own exit handlers, by which point the game
+        // heap (where every Mod object lives: the library's operator new binds to the executable's exported
+        // allocator) has already been torn down. Deleting the program object here reads freed memory (shadow
+        // runs 103 to 105: null vtable in ~UE4SSProgram's mod list, gdb-confirmed). The process is exiting, so
+        // stop the event loop and leak the rest, the same as the refused-init path above.
+        UE4SS_DBG("[UE4SS] Linux: process exiting; event loop stopped, program object intentionally not torn down.\n");
         if (s_program)
         {
-            delete s_program;
-            s_program = nullptr;
+            s_program->stop_event_loop();
         }
     }
 }
