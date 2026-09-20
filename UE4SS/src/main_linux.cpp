@@ -25,6 +25,8 @@
 #include <string>
 #include <filesystem>
 #include <signal.h>
+#include <sys/uio.h>
+#include <unistd.h>
 #include <ucontext.h>
 #include <pthread.h>
 #include <setjmp.h>
@@ -112,6 +114,24 @@ static void ue4ss_sigsegv_handler(int sig, siginfo_t* info, void* ucontext)
     uintptr_t rax = uc ? uc->uc_mcontext.gregs[REG_RAX] : 0;
     uintptr_t fault_addr = info ? (uintptr_t)info->si_addr : 0;
     UE4SS_ERR("[UE4SS] signal handler: sig=%d alloc=%d iter=%d mod=%d init=%d rip=0x%lx fault=0x%lx rdi=0x%lx rsi=0x%lx rdx=0x%lx rax=0x%lx\n", sig, s_has_alloc_jmpbuf, s_has_iter_jmpbuf, s_has_mod_jmpbuf, s_has_jmpbuf, (unsigned long)rip, (unsigned long)fault_addr, (unsigned long)rdi, (unsigned long)rsi, (unsigned long)rdx, (unsigned long)rax);
+    // palhook: the registers alone did not name the caller of a jump to address 0 at shutdown (shadow run 98), so
+    // also print rsp/rbp and the first 32 stack slots; return addresses are matched to modules offline (ASLR is off).
+    if (uc)
+    {
+        uintptr_t rsp = uc->uc_mcontext.gregs[REG_RSP];
+        uintptr_t rbp = uc->uc_mcontext.gregs[REG_RBP];
+        char line[1024]; int n = snprintf(line, sizeof line, "[UE4SS] signal stack: rsp=0x%lx rbp=0x%lx slots:", rsp, rbp);
+        const uintptr_t* sp = reinterpret_cast<const uintptr_t*>(rsp & ~static_cast<uintptr_t>(7));
+        for (int i = 0; i < 32 && n < static_cast<int>(sizeof line) - 24; ++i)
+        {
+            uintptr_t v = 0;
+            // process_vm_readv fails cleanly on unmapped memory and is a plain syscall, safe enough for a handler.
+            struct iovec local{&v, sizeof v}, remote{const_cast<uintptr_t*>(sp + i), sizeof v};
+            if (process_vm_readv(getpid(), &local, 1, &remote, 1, 0) != static_cast<ssize_t>(sizeof v)) break;
+            n += snprintf(line + n, sizeof line - n, " %lx", v);
+        }
+        UE4SS_ERR("%s\n", line);
+    }
     // Check per-call allocator recovery first (FMemory::Malloc/Realloc/Free)
     if (s_has_alloc_jmpbuf)
     {
