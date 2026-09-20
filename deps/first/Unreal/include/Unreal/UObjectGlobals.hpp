@@ -113,6 +113,13 @@ namespace RC::Unreal
         /** Assign an external Package to the created object if non-null */
         class UPackage* ExternalPackage = nullptr;
 
+        // palhook (UE 5.1 engines): the engine's FStaticConstructObjectParameters continues past
+        // ExternalPackage (PropertyInitCallback, SubobjectOverrides and more; its own constructor zeroes
+        // fields up to +0x80 and StaticConstructObject_Internal reads them). UE4SS's 64-byte struct left
+        // those reads on stack garbage (PalServer-Linux, shadow run 63). Zero-initialized reserve so a
+        // caller that sets none of them hands the engine "unset" for all of them.
+        uint8_t Reserved_5_1_Tail[0x100 - 0x40]{};
+
     public:
         FStaticConstructObjectParameters(const class UClass* InClass, UObject* InOuter = nullptr) : Class(InClass), Outer(InOuter) {}
     };
