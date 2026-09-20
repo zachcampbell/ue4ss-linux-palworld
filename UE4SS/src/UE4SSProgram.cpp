@@ -56,6 +56,50 @@
 #include <DiscordWebhook.hpp>
 #include <link.h>
 #include <elf.h>
+
+#ifdef __linux__
+// GMalloc walk (palhook): the game exports operator new (_Znwm) as a thin thunk into
+// FMemory::Malloc, whose first memory load is `mov rdi|rax, [rip+disp32]` of GMalloc
+// (FMalloc**). Following the thunk and decoding that load names the real global without
+// guessing from BSS contents. Verified on PalServer-Linux-Shipping v1.0.5.102999:
+// _Znwm 0x6f686e0 -> FMemory::Malloc 0x7810c20 -> GMalloc 0xc07f6a8.
+static void* ue4ss_resolve_gmalloc_from_operator_new(char* why, size_t why_len)
+{
+    auto* p = static_cast<uint8_t*>(dlsym(RTLD_DEFAULT, "_Znwm"));
+    if (!p) { snprintf(why, why_len, "_Znwm not exported"); return nullptr; }
+    uint8_t* target = nullptr;
+    for (size_t off = 0; off < 32;)
+    {
+        const uint8_t* i = p + off;
+        if (i[0] == 0xE9) { int32_t rel; memcpy(&rel, i + 1, 4); target = p + off + 5 + rel; break; }
+        if (i[0] == 0xEB) { target = p + off + 2 + static_cast<int8_t>(i[1]); break; }
+        if (i[0] == 0x48 && i[1] == 0x85 && i[2] == 0xFF) { off += 3; continue; }                  // test rdi,rdi
+        if (i[0] == 0xB8 || i[0] == 0xBE) { off += 5; continue; }                                  // mov eax|esi, imm32
+        if (i[0] == 0x48 && i[1] == 0x0F && i[2] == 0x44 && i[3] == 0xF8) { off += 4; continue; }  // cmove rdi,rax
+        snprintf(why, why_len, "unrecognised byte %02x at _Znwm+%zu", i[0], off);
+        return nullptr;
+    }
+    if (!target) { snprintf(why, why_len, "no jmp within 32 bytes of _Znwm"); return nullptr; }
+    for (size_t off = 0; off < 64; ++off)
+    {
+        const uint8_t* i = target + off;
+        if (i[0] == 0x48 && i[1] == 0x8B && (i[2] & 0xC7) == 0x05)  // mov r64, [rip+disp32]
+        {
+            int32_t disp; memcpy(&disp, i + 3, 4);
+            uint8_t* g = target + off + 7 + disp;
+            void* instance = *reinterpret_cast<void**>(g);
+            if (!instance) { snprintf(why, why_len, "GMalloc %p is still null", static_cast<void*>(g)); return nullptr; }
+            void* vtable = *static_cast<void**>(instance);
+            if (!vtable) { snprintf(why, why_len, "GMalloc %p instance %p has null vtable", static_cast<void*>(g), instance); return nullptr; }
+            snprintf(why, why_len, "_Znwm %p -> FMemory::Malloc %p -> GMalloc %p (instance %p, vtable %p)",
+                     static_cast<void*>(p), static_cast<void*>(target), static_cast<void*>(g), instance, vtable);
+            return g;
+        }
+    }
+    snprintf(why, why_len, "no rip-relative load within 64 bytes of FMemory::Malloc %p", static_cast<void*>(target));
+    return nullptr;
+}
+#endif
 #include <cstring>
 #endif
 #include <ObjectDumper/ObjectToString.hpp>
@@ -1782,6 +1826,22 @@ namespace RC
                 // where the second pointer is in a writable segment (the FMalloc instance).
                 config.ScanOverrides.fmemory_free = [&](std::vector<SignatureContainer>&, Unreal::Signatures::ScanResult& scan_result) {
                     void* addr = try_resolve("GMalloc");
+
+                    if (!addr)
+                    {
+                        char why[256] = {};
+                        addr = ue4ss_resolve_gmalloc_from_operator_new(why, sizeof why);
+                        if (addr)
+                        {
+                            UE4SS_DBG("[UE4SS] GMalloc via operator-new walk: %s\n", why);
+                            Output::send<LogLevel::Default>(STR("GMalloc via operator-new walk: {}\n"), ensure_str(why));
+                        }
+                        else
+                        {
+                            UE4SS_DBG("[UE4SS] GMalloc operator-new walk failed (%s); falling back\n", why);
+                            Output::send<LogLevel::Warning>(STR("GMalloc operator-new walk failed: {}\n"), ensure_str(why));
+                        }
+                    }
 
                     if (!addr)
                     {

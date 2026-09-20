@@ -120,38 +120,18 @@ namespace RC::Unreal
       throw std::runtime_error{"Tried to call 'FMemory::Malloc' before the FMalloc instance was found"};
     }
 
-#ifdef __linux__
-    // On Linux, UE4SS runs on a detached background thread. The engine's
-    // FMallocBinned2 uses pthread_getspecific for per-thread allocation
-    // caches. On the game thread, the TLS cache is initialized during
-    // engine boot. On UE4SS's background thread, the TLS cache may not
-    // be set up, causing the allocator to crash when accessing thread-local
-    // pool structures.
-    //
-    // Additionally, the GMalloc heuristic may find a false-positive
-    // allocator (multiple FMalloc* pointers exist in BSS, only one is
-    // the engine's GMalloc). Calling Malloc/Realloc/Free on a wrong
-    // allocator can crash.
-    //
-    // UE4SS's internal containers (TMap, TSparseArray, TArray) are
-    // self-contained and don't interact with the engine's garbage
-    // collector. Using the system allocator is safe and avoids both issues.
-    return SystemMalloc(Count);
-#else
+    // palhook: route through the engine allocator on Linux too. The port used libc here
+    // because its GMalloc came from a BSS heuristic; GMalloc is now derived from the exported
+    // operator new (see UE4SSProgram.cpp) and FMallocBinned2 tolerates threads without a TLS
+    // cache (proven on the UE4SS and asset-loading threads, palhook runs 27-33).
     return (*GMalloc)->Malloc(Count, Alignment);
-#endif
   }
 
   void FMemory::Free(void* Original)
   {
     if (!GMalloc || !*GMalloc || !UnrealInitializer::StaticStorage::bVersionedContainerIsInitialized) { return; }
 
-#ifdef __linux__
-    // See FMemory::Malloc for rationale.
-    SystemFree(Original);
-#else
     (*GMalloc)->Free(Original);
-#endif
   }
 
   SIZE_T FMemory::GetAllocSize(void* Original)
@@ -173,14 +153,7 @@ namespace RC::Unreal
       throw std::runtime_error{"Tried to call 'FMemory::Realloc' before the FMalloc instance was found"};
     }
 
-#ifdef __linux__
-    // See FMemory::Malloc for rationale.
-    if (!Original) return SystemMalloc(Count);
-    if (Count == 0) { SystemFree(Original); return nullptr; }
-    return ::realloc(Original, Count);
-#else
     return (*GMalloc)->Realloc(Original, Count, Alignment);
-#endif
   }
 
   SIZE_T FMemory::QuantizeSize(SIZE_T Count, uint32 Alignment)
@@ -190,13 +163,7 @@ namespace RC::Unreal
       return Count;
     }
 
-#ifdef __linux__
-    // See FMemory::Malloc for rationale. QuantizeSize is advisory — return
-    // the unmodified count when using the system allocator.
-    return Count;
-#else
     return (*GMalloc)->QuantizeSize(Count, Alignment);
-#endif
   }
   
 }
