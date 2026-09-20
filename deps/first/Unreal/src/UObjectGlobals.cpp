@@ -734,8 +734,12 @@ namespace RC::Unreal::UObjectGlobals
         // while we iterate, causing use-after-free if we re-read it per chunk.
         const auto ChunksPtrCached = ObjObjects.GetObjects();
         if (!ChunksPtrCached) return;
-        const int32_t SafeElementLimit = 4 * TUObjectArray::NumElementsPerChunk;
-        const int32_t EffectiveNumElements = NumElements < SafeElementLimit ? NumElements : SafeElementLimit;
+        // palhook: the port capped iteration at 4 chunks (262144 items). Palworld's live world starts above 357k
+        // objects, so every object created after boot (player pawns, spawned actors) was invisible to
+        // ForEachUObject and to everything built on it (GetObjectsOfClass, FindAllOf). Iterate all NumElements; the
+        // chunk loop is already bounded by NumChunks and null chunk pointers, and each item is read under the
+        // per-iteration fault recovery below.
+        const int32_t EffectiveNumElements = NumElements;
 #else
         const int32_t EffectiveNumElements = NumElements;
 #endif
