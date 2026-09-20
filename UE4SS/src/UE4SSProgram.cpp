@@ -779,6 +779,18 @@ namespace RC
         m_processing_events = false;
 
 #ifndef _WIN32
+        // palhook: on Linux this destructor runs from the shared-library destructor at process exit while the
+        // event loop thread is still iterating m_mods and calling fire_update(). Members are destroyed after this
+        // body, so without a join the loop can read a CppUserModBase that ~CppMod just freed (SIGBUS in
+        // CppMod::fire_update at shutdown after a play session, shadow run 96). Wait for the loop to observe the
+        // flag and leave before anything it touches is torn down. Skipped if we somehow run on that thread.
+        if (m_event_loop.joinable() && m_event_loop.get_id() != std::this_thread::get_id())
+        {
+            m_event_loop.join();
+        }
+#endif
+
+#ifndef _WIN32
         // Uninstall dlopen hook on Linux
         if (m_dlopen_hook_handle)
         {
