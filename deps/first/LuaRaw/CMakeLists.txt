@@ -76,16 +76,12 @@ target_compile_definitions(${TARGET}
         $<$<NOT:$<BOOL:${UE4SS_${TARGET}_BUILD_SHARED}>>:
             RC_${MODULE_NAME}_BUILD_STATIC>
         $<$<BOOL:${LUA_COMPILE_AS_CPP}>:LUA_COMPILED_AS_CPP>
-        # On Linux, Lua-internal errors must NOT use C++ exceptions:
-        # the game executable itself exports __cxa_throw (beats LD_PRELOAD in
-        # symbol order) and the process already carries libstdc++/libgcc_s —
-        # any throw from Lua frames rides a foreign/mixed unwinder and
-        # aborts. longjmp/setjmp keeps Lua error propagation entirely inside
-        # Lua's own design (as on upstream/Windows). The residual dtor-skip
-        # surface is bounded to UE4SS lua_CFunction binding frames: bindings
-        # must catch their own C++ exceptions (UE4SS TRY blocks do) before
-        # returning into Lua. See UE4SS-PALWORLD-LINUX-STATUS.md.
-        $<$<AND:$<BOOL:${LUA_COMPILE_AS_CPP}>,$<PLATFORM_ID:Linux>>:LUA_USE_LONGJMP>
+        # Linux once forced LUA_USE_LONGJMP here because the game executable and libsteam_api.so export their own
+        # __cxa_throw/__gxx_personality_v0 ahead of libstdc++ in the LD_PRELOAD scope, so a C++ throw out of Lua
+        # rode a mixed unwinder and aborted. libUE4SS now links libstdc++ statically and hides it
+        # (UE4SS/CMakeLists.txt), so Lua errors use C++ exceptions again as on Windows. longjmp skipped every
+        # destructor between lua_error and luaD_rawrunprotected: a failed RegisterHook leaked
+        # LuaMod::m_thread_actions_mutex twice per call and the game thread deadlocked on it (2026-09-21).
 )
             
 # Make headers visible in the IDE
