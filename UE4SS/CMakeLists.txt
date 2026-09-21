@@ -176,6 +176,12 @@ else()
     if(DEFINED funchook_SOURCE_DIR)
         target_include_directories(UE4SS PUBLIC ${funchook_SOURCE_DIR}/include)
     endif()
+    # Keep the C++ runtime private to this library. As an LD_PRELOAD it resolves its imports through the game's
+    # global scope, where the executable exports libc++abi's __cxa_throw and std typeinfos and libsteam_api.so
+    # exports its own __gxx_personality_v0, both ahead of libstdc++.so.6. A dynamically linked libstdc++ then
+    # throws with one runtime, unwinds with another and matches typeinfo with a third; the first exception on an
+    # uncommon path segfaults inside libsteam_api's personality routine (Palworld dedicated server, 2026-09-21).
+    target_link_options(UE4SS PRIVATE -static-libstdc++ -Wl,--exclude-libs,libstdc++.a)
     if(UE4SS_GUI_ENABLED)
         target_link_libraries(UE4SS PUBLIC ImGui glfw glad)
         find_package(OpenGL REQUIRED)
