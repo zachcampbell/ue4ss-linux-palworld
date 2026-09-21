@@ -182,6 +182,8 @@ else()
     # throws with one runtime, unwinds with another and matches typeinfo with a third; the first exception on an
     # uncommon path segfaults inside libsteam_api's personality routine (Palworld dedicated server, 2026-09-21).
     target_link_options(UE4SS PRIVATE -static-libstdc++ -Wl,--exclude-libs,libstdc++.a)
+    # The allocation operators stay bound to the game's FMemory-backed ones (see the file); keep ours hidden.
+    set_source_files_properties(${CMAKE_CURRENT_SOURCE_DIR}/src/LinuxAllocatorBridge.cpp PROPERTIES COMPILE_OPTIONS -fvisibility=hidden)
     if(UE4SS_GUI_ENABLED)
         target_link_libraries(UE4SS PUBLIC ImGui glfw glad)
         find_package(OpenGL REQUIRED)
