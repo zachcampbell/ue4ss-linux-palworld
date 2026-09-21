@@ -1913,7 +1913,17 @@ namespace RC::Unreal::UnrealInitializer
 #ifdef __linux__
             // On Linux, StaticFindObject uses GetFullName() which requires ProcessEvent
             // (not available on stripped binary). Skip this lookup to avoid crash.
-            Output::send<LogLevel::Warning>(STR("Linux: Skipping ExecuteUbergraph lookup. ProcessInternal hook not available.\n"));
+            // palhook: both addresses can come from UE4SS_Addresses.ini instead; say which state we are in.
+            if (UObject::ProcessInternalInternal.is_ready() && UObject::ProcessLocalScriptFunctionInternal.is_ready())
+            {
+                Output::send(STR("Linux: ProcessInternal {} and ProcessLocalScriptFunction {} from manual override; Blueprint function hooks available.\n"),
+                             UObject::ProcessInternalInternal.get_function_address(),
+                             UObject::ProcessLocalScriptFunctionInternal.get_function_address());
+            }
+            else
+            {
+                Output::send<LogLevel::Warning>(STR("Linux: Skipping ExecuteUbergraph lookup. ProcessInternal hook not available.\n"));
+            }
 #else
             auto ExecuteUbergraphFunction = UObjectGlobals::StaticFindObject<UFunction*>(nullptr, nullptr, STR("/Script/CoreUObject.Object:ExecuteUbergraph"));
             if (!ExecuteUbergraphFunction)

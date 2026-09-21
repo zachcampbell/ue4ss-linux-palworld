@@ -2516,6 +2516,15 @@ namespace RC
 
                 // Override ProcessLocalScriptFunction scan — needed for BP mod loading
                 config.ScanOverrides.process_local_script_function = [&](std::vector<SignatureContainer>&, Unreal::Signatures::ScanResult& scan_result) {
+                    // palhook: a manual UE4SS_Addresses.ini value wins, as for ProcessInternal. The byte-pattern fallback
+                    // below matched a mid-function spill sequence inside a static-init routine on PalServer 1.0.5
+                    // (0x4782ea5) and the Lua script hook was detoured onto it.
+                    if (Unreal::UObject::ProcessLocalScriptFunctionInternal.get_function_address())
+                    {
+                        UE4SS_DBG("[UE4SS] ProcessLocalScriptFunction already set (manual override), skipping scan\n");
+                        scan_result.SuccessMessage.emplace_back(STR("ProcessLocalScriptFunction kept from manual override"));
+                        return;
+                    }
                     void* addr = try_resolve("UObject::ProcessLocalScriptFunction");
                     if (!addr) addr = try_resolve("_ZN6UObject26ProcessLocalScriptFunctionER5FFrameRPv");
                     if (!addr) addr = try_resolve("ProcessLocalScriptFunction");
