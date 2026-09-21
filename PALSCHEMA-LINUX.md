@@ -1,6 +1,6 @@
 # Branch linux-palschema: running PalSchema on the native Linux Palworld server
 
-Twenty-five commits on top of the v1.0.2-palworld-linux release (4bf136e), made while porting PalSchema to
+Twenty-six commits on top of the v1.0.2-palworld-linux release (4bf136e), made while porting PalSchema to
 this UE4SS build on PalServer-Linux-Shipping v1.0.5.102999 (September 2026). Each commit message says
 what broke and how it was found; in short:
 
@@ -33,6 +33,13 @@ what broke and how it was found; in short:
   the wrong pointer table (0xbcc4448; the interpreter uses 0xc1534a0), and with it every hooked native
   called from Blueprint script stepped its parameters through the wrong functions and desynced the caller
   (an "undefined opcode" fatal, or a null call). Ship an ini with `GNatives=0xc1534a0` next to the library.
+- Blueprint function hooks (commit 26): the manual ProcessLocalScriptFunction address wins over the byte-pattern
+  scan as well. That scan matched a register spill inside a static-init routine (0x4782ea5) and funchook detoured
+  the Lua script hook onto it; ProcessInternal's own scan picked 0x43f8c30, so every RegisterHook on a Blueprint
+  function was refused (UFunction::Func 0x7b7f590 never equalled it). With `ProcessInternal=0x7b7f590` and
+  `ProcessLocalScriptFunction=0x7b7f6b0` (the tail-jump target at the end of ProcessInternal) in the ini, script
+  hooks register and fire; the callback runs after the function, as on Windows, and only for calls that enter
+  through ProcessEvent (script-to-script calls have the function inlined into UObject::CallFunction).
 
 Build (Ubuntu, gcc-13, ninja):
 
