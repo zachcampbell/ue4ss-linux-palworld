@@ -2266,6 +2266,16 @@ namespace RC
                 // Heuristic: find a contiguous array of at least 64 pointers where all point
                 // into executable PT_LOAD segments.
                 config.ScanOverrides.gnatives = [&](std::vector<SignatureContainer>&, Unreal::Signatures::ScanResult& scan_result) {
+                    // A manual UE4SS_Addresses.ini value is applied before this scan runs; keep it. The heuristic below
+                    // picked a different 64-pointer table on PalServer-Linux-Shipping (0xbcc4448 instead of the
+                    // interpreter's 0xc1534a0), and every hooked native called from Blueprint script then stepped its
+                    // parameters through the wrong dispatch table and desynced the caller's bytecode.
+                    if (Unreal::GNatives_Internal)
+                    {
+                        UE4SS_DBG("[UE4SS] GNatives already set (manual override) = %p, skipping scan\n", (void*)Unreal::GNatives_Internal);
+                        scan_result.SuccessMessage.emplace_back(STR("GNatives kept from manual override"));
+                        return;
+                    }
                     void* addr = try_resolve("GNatives");
 
                     if (!addr)
@@ -2401,6 +2411,12 @@ namespace RC
 
                 // Override ProcessInternal scan — needed for BP mod loading (BeginPlay hooks, function calls)
                 config.ScanOverrides.process_internal = [&](std::vector<SignatureContainer>&, Unreal::Signatures::ScanResult& scan_result) {
+                    if (Unreal::UObject::ProcessInternalInternal.get_function_address())
+                    {
+                        UE4SS_DBG("[UE4SS] ProcessInternal already set (manual override), skipping scan\n");
+                        scan_result.SuccessMessage.emplace_back(STR("ProcessInternal kept from manual override"));
+                        return;
+                    }
                     void* addr = try_resolve("UObject::ProcessInternal");
                     if (!addr) addr = try_resolve("_ZN6UObject15ProcessInternalER5FFrameRPv");
                     if (!addr) addr = try_resolve("ProcessInternal");
