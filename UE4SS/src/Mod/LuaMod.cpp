@@ -7459,14 +7459,20 @@ Overloads:
         {
             if (m_pause_events_processing)
             {
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
                 continue;
             }
 
             // Lua-state thread safety: the mod thread's async state shares the
             // mod's global_State with every other Lua state; serialize all
-            // access against the game thread's detour callbacks.
-            std::lock_guard<std::recursive_mutex> ue4ss_lua_guard{LuaMod::m_thread_actions_mutex}; // Lua-state thread safety
-            process_delayed_actions();
+            // access against the game thread's detour callbacks. Hold the lock
+            // only while working: sleeping under it let three async threads keep
+            // it busy almost continuously and starved the game thread's
+            // ProcessEvent hook until the engine's hang detector fired.
+            {
+                std::lock_guard<std::recursive_mutex> ue4ss_lua_guard{LuaMod::m_thread_actions_mutex}; // Lua-state thread safety
+                process_delayed_actions();
+            }
 
             std::this_thread::sleep_for(std::chrono::milliseconds(5));
         }
