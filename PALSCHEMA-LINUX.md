@@ -1,6 +1,6 @@
 # Branch linux-palschema: running PalSchema on the native Linux Palworld server
 
-Twenty-six commits on top of the v1.0.2-palworld-linux release (4bf136e), made while porting PalSchema to
+Twenty-seven commits on top of the v1.0.2-palworld-linux release (4bf136e), made while porting PalSchema to
 this UE4SS build on PalServer-Linux-Shipping v1.0.5.102999 (September 2026). Each commit message says
 what broke and how it was found; in short:
 
@@ -40,6 +40,10 @@ what broke and how it was found; in short:
   `ProcessLocalScriptFunction=0x7b7f6b0` (the tail-jump target at the end of ProcessInternal) in the ini, script
   hooks register and fire; the callback runs after the function, as on Windows, and only for calls that enter
   through ProcessEvent (script-to-script calls have the function inlined into UObject::CallFunction).
+- Script hook self (commit 27): ProcessInternal tail-jumps into ProcessLocalScriptFunction after two virtual calls
+  without restoring rdi, since the real function reads Stack.Object and ignores Context. The Linux detour now takes
+  the object from the frame; before that every script-hook callback that called self:get() dereferenced a stale
+  register (0x11a) and the server died two seconds after a player joined a base with hungry pals.
 
 Build (Ubuntu, gcc-13, ninja):
 
