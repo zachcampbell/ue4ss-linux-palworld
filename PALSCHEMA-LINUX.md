@@ -1,6 +1,6 @@
 # Branch linux-palschema: running PalSchema on the native Linux Palworld server
 
-Twenty commits on top of the v1.0.2-palworld-linux release (4bf136e), made while porting PalSchema to
+Twenty-four commits on top of the v1.0.2-palworld-linux release (4bf136e), made while porting PalSchema to
 this UE4SS build on PalServer-Linux-Shipping v1.0.5.102999 (September 2026). Each commit message says
 what broke and how it was found; in short:
 
@@ -18,6 +18,16 @@ what broke and how it was found; in short:
 - Exit path: the event loop is stopped from the engine's UObject-array shutdown notification and a
   late atexit handler, and the program object is never torn down from the library destructor (the
   game heap is gone by then). Signal handler prints a stack dump.
+- C++ runtime kept private (commits 21-24, found with the first batch of Lua mods): libstdc++ is
+  linked statically and hidden, because an LD_PRELOAD resolves its imports through the executable
+  (which exports libc++abi's __cxa_throw and std typeinfos) and libsteam_api.so (which exports its own
+  __gxx_personality_v0) before libstdc++.so.6, so a dynamically linked runtime throws with one library,
+  unwinds with another and faults. The global allocation operators still forward to the game binary's
+  FMemory-backed ones (UE4SS/src/LinuxAllocatorBridge.cpp) so UE4SS heap objects stay in the engine
+  allocator. With the runtime private, Lua errors are C++ exceptions again instead of longjmp (which
+  skipped every lock_guard between lua_error and luaD_rawrunprotected and leaked the Lua mutex on each
+  refused RegisterHook), and LuaMod::update_async no longer sleeps while holding that mutex (three Lua
+  mods starved the game thread until the engine's hang detector fired).
 
 Build (Ubuntu, gcc-13, ninja):
 
@@ -25,7 +35,8 @@ Build (Ubuntu, gcc-13, ninja):
           -DUE4SS_GUI_ENABLED=OFF -DUE4SS_INPUT_ENABLED=OFF
     ninja -C build_linux UE4SS
 
-C++ mods must be built with the same GUI/input settings (CppUserModBase layout differs otherwise).
+C++ mods must be built with the same GUI/input settings (CppUserModBase layout differs otherwise) and
+may carry their own static libstdc++ (the companion PalSchema build does).
 Server-side requirements: run the binary with ASLR off (`setarch x86_64 -R`), delete the empty
 MajorVersion/MinorVersion/DebugBuild lines from the shipped UE4SS-settings.ini, disable the stock Lua
 mods, set DefaultExecuteInGameThreadMethod = ProcessEvent. The matching PalSchema branch lives in the
