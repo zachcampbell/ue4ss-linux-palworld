@@ -303,6 +303,36 @@ namespace RC::Unreal::Hook::Internal
         FInitGameStateDetour() = default;
     };
 
+#ifdef __linux__
+    // palhook: on the Linux PalServer binary UObject::ProcessInternal reaches ProcessLocalScriptFunction through a
+    // tail jump after two virtual calls (GetFunctionCallspace, CallRemoteFunction) and never restores rdi, because
+    // the real ProcessLocalScriptFunction ignores its Context argument and reads Stack.Object instead. The Context
+    // this detour receives is therefore whatever the last callee left in rdi (0x11a in run 143), and the Lua script
+    // hook handed that to mods as 'self'. Use the frame's object, which is what the engine itself uses.
+    class FProcessLocalScriptFunctionDetour : public TDetourInstance<EDetourTarget::ProcessLocalScriptFunction, ProcessLocalScriptFunctionSignature>
+    {
+    UE_HOOK_PROTECTED:
+        FProcessLocalScriptFunctionDetour() = default;
+
+        template<EDetourTarget Target>
+        friend auto GetDetourInstance() -> TDetourTraits<Target>::Impl*;
+
+    public:
+        void Invoke(UObject* Context, FFrame& Stack, void* Result)
+        {
+            if (Stack.Object()) Context = Stack.Object();
+
+            TCallbackIterationData<void> IterationData{ DetourName };
+            InvokeCallbacks(EHookType::Pre, IterationData, Context, Stack, Result);
+            if(!IterationData.OriginalFunctionCallPrevented()) [[likely]]
+            {
+                PLH::FnCast(Trampoline, TargetFunction->get_function_pointer())(Context, Stack, Result);
+            }
+            InvokeCallbacks(EHookType::Post, IterationData, Context, Stack, Result);
+        }
+    };
+#endif
+
     // Subclass for StaticConstructObject, which handles the different versions of the function.
     class FStaticConstructObjectDetour : public TDetourInstance<EDetourTarget::StaticConstructObject, StaticConstructObjectSignature> 
     {

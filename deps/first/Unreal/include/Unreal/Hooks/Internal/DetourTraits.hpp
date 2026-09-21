@@ -16,6 +16,7 @@ namespace RC::Unreal::Hook::Internal
     class FUStructLinkDetour;
     class FCallFunctionByNameWithArgumentsDetour;
     class FInitGameStateDetour;
+    class FProcessLocalScriptFunctionDetour;
 
     template<EDetourTarget DetourTarget, typename HookSig>
     class TDetourInstance;
@@ -125,7 +126,11 @@ namespace RC::Unreal::Hook::Internal
     {
         using Signature = ProcessLocalScriptFunctionSignature;
         using Base = TDetourInstance<EDetourTarget::ProcessLocalScriptFunction, Signature>;
+#ifdef __linux__
+        using Impl = FProcessLocalScriptFunctionDetour;
+#else
         using Impl = Base;
+#endif
     };
 
     template<>
