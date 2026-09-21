@@ -1,6 +1,6 @@
 # Branch linux-palschema: running PalSchema on the native Linux Palworld server
 
-Twenty-four commits on top of the v1.0.2-palworld-linux release (4bf136e), made while porting PalSchema to
+Twenty-five commits on top of the v1.0.2-palworld-linux release (4bf136e), made while porting PalSchema to
 this UE4SS build on PalServer-Linux-Shipping v1.0.5.102999 (September 2026). Each commit message says
 what broke and how it was found; in short:
 
@@ -28,6 +28,11 @@ what broke and how it was found; in short:
   skipped every lock_guard between lua_error and luaD_rawrunprotected and leaked the Lua mutex on each
   refused RegisterHook), and LuaMod::update_async no longer sleeps while holding that mutex (three Lua
   mods starved the game thread until the engine's hang detector fired).
+- Manual addresses win (commit 25): UE4SS_Addresses.ini values for GNatives and ProcessInternal are no
+  longer overwritten by the later heuristic scans. On PalServer-Linux-Shipping the GNatives heuristic picks
+  the wrong pointer table (0xbcc4448; the interpreter uses 0xc1534a0), and with it every hooked native
+  called from Blueprint script stepped its parameters through the wrong functions and desynced the caller
+  (an "undefined opcode" fatal, or a null call). Ship an ini with `GNatives=0xc1534a0` next to the library.
 
 Build (Ubuntu, gcc-13, ninja):
 
