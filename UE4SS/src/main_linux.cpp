@@ -20,6 +20,7 @@
 #include <memory>
 #include <thread>
 #include <atomic>
+#include <fstream>
 #include <dlfcn.h>
 #include <unistd.h>
 #include <string>
@@ -247,16 +248,51 @@ static auto wait_for_game_ready() -> void
     // GUObjectArray) during boot. If UE4SS scans for GUObjectArray too early, it
     // finds transient structs that later move, causing the resolved address to
     // read garbage (negative/unstable element counts) and crash during init.
-    // Wait until the engine has finished its memory layout churn (the server is
-    // fully booted and ticking) before we scan. 30s is conservative; the engine
-    // reaches steady state (~100+ FPS tick) well within this window.
-    UE4SS_DBG("[UE4SS] Waiting for game to initialize (30s for heap to stabilize)...\n");
+    // palhook: instead of a fixed 30 s, watch for the game's UDP port (-Port=N on
+    // the command line, 8211 by default): a dedicated server binds it once the
+    // world is up and ticking, which is the steady state the fixed wait was
+    // approximating. Settle three more seconds after the bind, and keep the old
+    // 30 s as the ceiling for anything that never binds (clients, odd setups).
+    int port = 8211;
+    {
+        std::ifstream cmd("/proc/self/cmdline", std::ios::binary);
+        std::string arg;
+        while (std::getline(cmd, arg, '\0'))
+        {
+            if (arg.rfind("-Port=", 0) == 0 || arg.rfind("-port=", 0) == 0)
+            {
+                port = std::atoi(arg.c_str() + 6);
+            }
+        }
+    }
+    char needle[16]{};
+    std::snprintf(needle, sizeof needle, ":%04X ", port);
+    UE4SS_DBG("[UE4SS] Waiting for game to initialize (until UDP port %d is bound, 30s max)...\n", port);
     for (int i = 0; i < 30; ++i)
     {
         sleep(1);
+        bool bound = false;
+        for (const char* table : {"/proc/net/udp", "/proc/net/udp6"})
+        {
+            std::ifstream f(table);
+            std::string line;
+            while (std::getline(f, line))
+            {
+                if (line.find(needle) != std::string::npos) { bound = true; break; }
+            }
+            if (bound) break;
+        }
+        if (bound)
+        {
+            UE4SS_DBG("[UE4SS] Game port %d bound after %d s; settling 3 s\n", port, i + 1);
+            sleep(3);
+            return;
+        }
         UE4SS_VDBG("[UE4SS] Waiting... (%d/30)\n", i + 1);
     }
+    UE4SS_DBG("[UE4SS] Game port %d never bound; proceeding after 30 s\n", port);
 }
+
 
 // Check if this process is the game server (not a helper like crashpad_handler,
 // and not an unrelated utility process that happened to inherit LD_PRELOAD from
