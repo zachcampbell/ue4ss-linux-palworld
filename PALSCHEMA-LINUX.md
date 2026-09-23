@@ -1,6 +1,6 @@
 # Branch linux-palschema: running PalSchema on the native Linux Palworld server
 
-Twenty-eight commits on top of the v1.0.2-palworld-linux release (4bf136e), made while porting PalSchema to
+Twenty-nine commits on top of the v1.0.2-palworld-linux release (4bf136e), made while porting PalSchema to
 this UE4SS build on PalServer-Linux-Shipping v1.0.5.102999 (September 2026). Each commit message says
 what broke and how it was found; in short:
 
@@ -44,6 +44,11 @@ what broke and how it was found; in short:
   without restoring rdi, since the real function reads Stack.Object and ignores Context. The Linux detour now takes
   the object from the frame; before that every script-hook callback that called self:get() dereferenced a stale
   register (0x11a) and the server died two seconds after a player joined a base with hungry pals.
+- Startup wait (commits 28 and 29): an attempt to start UE4SS as soon as the server's UDP port was bound (~7 s
+  after launch) is reverted. At that point the engine is still constructing objects: one boot crashed inside
+  store_all_object_types at 6 s, and PalSchema's blocking asset loads landing on the startup streaming left every
+  later client join stuck at "connected". The fixed 30 s wait stays; PalSchema's Linux core init also holds until
+  30 s of uptime on its own.
 
 Build (Ubuntu, gcc-13, ninja):
 
