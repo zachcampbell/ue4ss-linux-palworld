@@ -1,6 +1,6 @@
 # Branch linux-palschema: running PalSchema on the native Linux Palworld server
 
-Twenty-seven commits on top of the v1.0.2-palworld-linux release (4bf136e), made while porting PalSchema to
+Twenty-eight commits on top of the v1.0.2-palworld-linux release (4bf136e), made while porting PalSchema to
 this UE4SS build on PalServer-Linux-Shipping v1.0.5.102999 (September 2026). Each commit message says
 what broke and how it was found; in short:
 
