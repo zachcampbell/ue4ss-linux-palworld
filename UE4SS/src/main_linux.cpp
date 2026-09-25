@@ -181,18 +181,28 @@ extern "C" bool ue4ss_with_crash_recovery(const std::function<void()>& func)
 
 // Wrap a callable with per-iteration SIGSEGV recovery.
 // Returns true if the callable completed normally, false if it crashed.
+// palhook: nesting-safe. The recovery is now armed once per chunk, so a callback that starts another walk (a Lua
+// ForEachUObject callback calling FindAllOf) would otherwise overwrite the thread's single jump buffer and leave the
+// rest of the outer chunk unprotected; the outer buffer and flag are saved here and restored on every exit.
 extern "C" bool ue4ss_with_iter_recovery(const std::function<void()>& func)
 {
+    sigjmp_buf outer_jmpbuf;
+    const bool outer_has_jmpbuf = s_has_iter_jmpbuf;
+    if (outer_has_jmpbuf) { std::memcpy(&outer_jmpbuf, &s_iter_jmpbuf, sizeof(sigjmp_buf)); }
+    auto restore_outer = [&]() {
+        if (outer_has_jmpbuf) { std::memcpy(&s_iter_jmpbuf, &outer_jmpbuf, sizeof(sigjmp_buf)); }
+        s_has_iter_jmpbuf = outer_has_jmpbuf;
+    };
     int sig = sigsetjmp(s_iter_jmpbuf, 1);
     if (sig != 0)
     {
-        s_has_iter_jmpbuf = false;
+        restore_outer();
         UE4SS_DBG("[UE4SS] iter recovery: caught signal %d, skipping item\n", sig);
         return false;
     }
     s_has_iter_jmpbuf = true;
     func();
-    s_has_iter_jmpbuf = false;
+    restore_outer();
     return true;
 }
 

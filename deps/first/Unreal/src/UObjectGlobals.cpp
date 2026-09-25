@@ -20,6 +20,7 @@ extern "C" bool ue4ss_with_iter_recovery(const std::function<void()>& func);
 #include <DynamicOutput/DynamicOutput.hpp>
 #ifdef __linux__
 #include <vector>
+#include <unordered_map>
 #include <algorithm>
 #endif
 
@@ -471,32 +472,55 @@ namespace RC::Unreal::UObjectGlobals
         return FindObject(Class, InOuter, InName, bExactClass, &Searcher);
     }
 
+    // palhook: a match is decided per CLASS, not per object: the answer for a UClass is computed once per call
+    // (its own name and every super's) and cached, and the flag/IsA validity test only runs for matching objects.
+    // Before, every object in GUObjectArray paid an EObjectFlags conversion, an IsA<UClass> super walk and a
+    // second super walk, which made one FindAllOf ~200 ms on a Palworld server with ~500k objects.
+    class FClassNameMatchCache
+    {
+      public:
+        explicit FClassNameMatchCache(FName InClassName) : ClassName(InClassName) {}
+        auto Matches(UClass* Class) -> bool
+        {
+            if (Class == LastClass) { return LastResult; }
+            auto It = Results.find(Class);
+            bool bMatches{};
+            if (It != Results.end())
+            {
+                bMatches = It->second;
+            }
+            else
+            {
+                for (UStruct* SuperStruct : TSuperStructRange(Class))
+                {
+                    if (SuperStruct->GetNamePrivate().Equals(ClassName)) { bMatches = true; break; }
+                }
+                Results.emplace(Class, bMatches);
+            }
+            LastClass = Class;
+            LastResult = bMatches;
+            return bMatches;
+        }
+
+      private:
+        FName ClassName;
+        std::unordered_map<UClass*, bool> Results;
+        UClass* LastClass{};
+        bool LastResult{};
+    };
+
     auto FindFirstOf(FName ClassName) -> UObject*
     {
         UObject* ObjectFound{nullptr};
+        FClassNameMatchCache MatchCache{ClassName};
 
         UObjectGlobals::ForEachUObject([&](UObject* Object, [[maybe_unused]]int32_t ChunkIndex, [[maybe_unused]]int32_t ObjectIndex) {
             UClass* Class = Object->GetClassPrivate();
-
-            if (Class->GetNamePrivate().Equals(ClassName) && IsValidObjectForFindXOf(Object))
-            {
-                ObjectFound = Object;
-                return LoopAction::Break;
-
-            }
-
-            if (!IsValidObjectForFindXOf(Object)) { return LoopAction::Continue; }
-
-            for (UStruct* super_struct : TSuperStructRange(Class))
-            {
-                if (super_struct->GetNamePrivate().Equals(ClassName))
-                {
-                    ObjectFound = Object;
-                    break;
-                }
-            }
-
-            return LoopAction::Continue;
+            if (!Class || !MatchCache.Matches(Class) || !IsValidObjectForFindXOf(Object)) { return LoopAction::Continue; }
+            // palhook: upstream only stopped on an exact-class match; a subclass match kept walking the whole array
+            // and returned the LAST matching object, so FindFirstOf("PalPlayerController") was always a full scan.
+            ObjectFound = Object;
+            return LoopAction::Break;
         });
 
         return ObjectFound;
@@ -529,29 +553,14 @@ namespace RC::Unreal::UObjectGlobals
 
     auto FindAllOf(FName ClassName, std::vector<UObject*>& OutStorage) -> void
     {
+        FClassNameMatchCache MatchCache{ClassName};
         UObjectGlobals::ForEachUObject([&](UObject* Object, [[maybe_unused]]int32_t ChunkIndex, [[maybe_unused]]int32_t ObjectIndex) {
             if (!Object) { return LoopAction::Continue; }
 
             UClass* Class = Object->GetClassPrivate();
-            if (!Class) { return LoopAction::Continue; }
+            if (!Class || !MatchCache.Matches(Class)) { return LoopAction::Continue; }
 
-            if (Class->GetNamePrivate().Equals(ClassName) && IsValidObjectForFindXOf(Object))
-            {
-                OutStorage.emplace_back(Object);
-                return LoopAction::Continue;
-            }
-
-            if (!IsValidObjectForFindXOf(Object)) { return LoopAction::Continue; }
-
-            for (UStruct* SuperStruct : TSuperStructRange(Class))
-            {
-                if (SuperStruct->GetNamePrivate().Equals(ClassName))
-                {
-                    OutStorage.emplace_back(Object);
-                    break;
-                }
-            }
-
+            if (IsValidObjectForFindXOf(Object)) { OutStorage.emplace_back(Object); }
             return LoopAction::Continue;
         });
     }
@@ -592,6 +601,7 @@ namespace RC::Unreal::UObjectGlobals
         }
 
         size_t NumObjectsFound{};
+        FClassNameMatchCache MatchCache{ClassName};
 
         ForEachUObject([&](UObject* Object, int32, int32) {
             bool bNameMatches{};
@@ -612,18 +622,9 @@ namespace RC::Unreal::UObjectGlobals
                         bClassMatches = true;
                     }
                 }
-                else
+                else if (ObjClass)
                 {
-                    while (ObjClass)
-                    {
-                        if (ObjClass->GetNamePrivate().Equals(ClassName))
-                        {
-                            bClassMatches = true;
-                            break;
-                        }
-
-                        ObjClass = ObjClass->GetSuperClass();
-                    }
+                    bClassMatches = MatchCache.Matches(ObjClass);
                 }
             }
 
@@ -754,40 +755,64 @@ namespace RC::Unreal::UObjectGlobals
             const auto ChunkPtr = ChunksPtr[ChunkIndex];
 #endif
             if (!ChunkPtr) break;
+#ifdef __linux__
+            // SIGSEGV recovery around the iteration body: the GC can free objects and leave stale FUObjectItem entries
+            // that crash when accessed. palhook: the port armed the recovery for EVERY item, and each arm is a
+            // sigsetjmp that saves the signal mask (a syscall) plus a heap-allocated std::function, so one walk of
+            // ~500k objects cost about 200 ms of game thread. It is now armed once per chunk; after a fault the walk
+            // resumes at the item after the one that faulted. The indices are volatile so their values after the
+            // siglongjmp are the ones last stored, never a stale register copy.
+            volatile int32_t ItemIndex = 0;
+            volatile int32_t ItemGlobalIndex = GlobalIndex;
+            volatile bool bStop = false;
+            while (!bStop && ItemIndex < TUObjectArray::NumElementsPerChunk && ItemGlobalIndex < EffectiveNumElements)
+            {
+                auto Advance = [&]() {
+                    ItemIndex = ItemIndex + 1;
+                    ItemGlobalIndex = ItemGlobalIndex + 1;
+                };
+                const bool bCompleted = ue4ss_with_iter_recovery([&]() {
+                    for (; ItemIndex < TUObjectArray::NumElementsPerChunk && ItemGlobalIndex < EffectiveNumElements; Advance())
+                    {
+                        const int32_t Index = ItemIndex;
+                        const auto ObjectItem = std::bit_cast<FUObjectItem*>(&std::bit_cast<uint8_t*>(ChunkPtr)[Index * ItemSize]);
+                        UObject* Object = ObjectItem->GetUObject();
+                        if (!Object) { continue; }
+                        if (ObjectItem->IsUnreachable()) { continue; }
+                        const uintptr_t ObjAddr = reinterpret_cast<uintptr_t>(Object);
+                        if (ObjAddr < 0x7e0000000000 || ObjAddr > 0x7fffffffffff) { continue; }
+                        // palhook: the port skipped items whose internal flags are zero as "stale". Zero is the normal
+                        // state of a live, reachable, non-rooted object, so that filter hid them from every UE4SS
+                        // enumeration (shadow runs 55 to 58). Unreachable and null are handled above.
+                        GUOBJECTARRAY_PROFILE_ITER_COUNT()
+                        if (Callable(Object, ChunkIndex, Index) == LoopAction::Break)
+                        {
+                            bStop = true;
+                            return;
+                        }
+                    }
+                });
+                if (!bCompleted)
+                {
+                    // The item at ItemIndex faulted: skip it and carry on with the rest of the chunk.
+                    Advance();
+                }
+            }
+            GlobalIndex = ItemGlobalIndex;
+            if (bStop) { break; }
+#else
             for (int32_t ItemIndex = 0; ItemIndex < TUObjectArray::NumElementsPerChunk && GlobalIndex < EffectiveNumElements; ++ItemIndex, ++GlobalIndex)
             {
                 const auto ObjectItem = std::bit_cast<FUObjectItem*>(&std::bit_cast<uint8_t*>(ChunkPtr)[ItemIndex * ItemSize]);
-#ifdef __linux__
-                // Wrap the ENTIRE iteration body (including GetUObject, IsUnreachable,
-                // and callback) in per-iteration SIGSEGV recovery. The GC can free
-                // objects and leave stale FUObjectItem entries that crash when accessed.
-                UObject* Object = nullptr;
-                LoopAction iter_action = LoopAction::Continue;
-                bool crashed = !ue4ss_with_iter_recovery([&]() {
-                    Object = ObjectItem->GetUObject();
-                    if (!Object) { return; }
-                    if (ObjectItem->IsUnreachable()) { return; }
-                    uintptr_t obj_addr = reinterpret_cast<uintptr_t>(Object);
-                    if (obj_addr < 0x7e0000000000 || obj_addr > 0x7fffffffffff) { return; }
-                    // palhook: the port skipped items whose internal flags are zero as "stale". Zero is the
-                    // normal state of a live, reachable, non-rooted object (the game instance, most runtime
-                    // objects), so that filter hid them from every UE4SS enumeration (shadow runs 55 to 58).
-                    // Unreachable and null are already handled above; the pointer-range check stays.
-                    GUOBJECTARRAY_PROFILE_ITER_COUNT()
-                    iter_action = Callable(Object, ChunkIndex, ItemIndex);
-                });
-                (void)crashed;
-                Action = iter_action;
-#else
                 const auto Object = ObjectItem->GetUObject();
                 if (!Object) { continue; }
                 if (ObjectItem->IsUnreachable()) { continue; }
                 GUOBJECTARRAY_PROFILE_ITER_COUNT()
                 Action = Callable(Object, ChunkIndex, ItemIndex);
-#endif
                 if (Action == LoopAction::Break) { break; }
             }
             if (Action == LoopAction::Break) { break; }
+#endif
         }
         GUOBJECTARRAY_PROFILE_ITER_END()
     }

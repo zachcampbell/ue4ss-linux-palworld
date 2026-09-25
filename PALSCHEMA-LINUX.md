@@ -49,11 +49,26 @@ what broke and how it was found; in short:
   store_all_object_types at 6 s, and PalSchema's blocking asset loads landing on the startup streaming left every
   later client join stuck at "connected". The fixed 30 s wait stays; PalSchema's Linux core init also holds until
   30 s of uptime on its own.
+- Object walks (commit 30): every FindAllOf/FindFirstOf/ForEachUObject walked GUObjectArray (600k+ objects on a
+  Palworld server) with the SIGSEGV recovery armed per ITEM, i.e. a mask-saving sigsetjmp syscall and a heap
+  std::function per object: one FindAllOf held the game thread ~225 ms, and a Lua mod polling one every 5 s showed
+  up as client "connection lost" stalls. Recovery is now armed once per chunk and resumes after a faulting item
+  (nesting-safe: the outer jump buffer is saved and restored). Class matching is cached per UClass per call and
+  the validity test only runs for matches. FindFirstOf now stops at the first match; upstream kept walking after
+  a subclass match and returned the last one, so any FindFirstOf of a parent class was a full scan.
+  ForEachUObject_ChunkedInRange/ForEachUObjectInChunk (GUI LiveView only) still have upstream's bugs: the start
+  offset applied to every chunk, the end bound counted per chunk, no Linux recovery.
+- Optimization: the Game__Dev__Linux64 config compiles with CMAKE_CXX_FLAGS_DEBUG only (`-g`, no optimization).
+  Built with `-g -O2 -fno-strict-aliasing -fno-delete-null-pointer-checks` (same defines and layouts, so C++ mods
+  built against the -O0 library still load) a full walk is ~45 ms instead of ~110 ms, and libUE4SS's share of the
+  game thread on a live server with a player fell from 19% to 2%.
 
 Build (Ubuntu, gcc-13, ninja):
 
+    F="-g -O2 -fno-strict-aliasing -fno-delete-null-pointer-checks"
     cmake -S . -B build_linux -G Ninja -DCMAKE_BUILD_TYPE=Game__Dev__Linux64 \
-          -DUE4SS_GUI_ENABLED=OFF -DUE4SS_INPUT_ENABLED=OFF
+          -DUE4SS_GUI_ENABLED=OFF -DUE4SS_INPUT_ENABLED=OFF \
+          -DCMAKE_CXX_FLAGS_DEBUG="$F" -DCMAKE_C_FLAGS_DEBUG="$F"
     ninja -C build_linux UE4SS
 
 C++ mods must be built with the same GUI/input settings (CppUserModBase layout differs otherwise) and
