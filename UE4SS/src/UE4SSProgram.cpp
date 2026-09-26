@@ -279,6 +279,8 @@ namespace RC
     };
     auto output_all_member_offsets(IsCoalesced is_coalesced) -> void
     {
+        // Over a thousand lines per boot; a debug aid, so only at DebugLogLevel >= 1.
+        if (UE4SSDebug::get_debug_level() < 1) return;
         Output::send(STR("\n##### MEMBER OFFSETS START ({}) #####\n\n"), is_coalesced == IsCoalesced::No ? STR("MemberVariableLayout") : STR("Coalesced"));
         OUTPUT_MEMBER_OFFSETS_FOR_STRUCT(UObjectBase);
         OUTPUT_MEMBER_OFFSETS_FOR_STRUCT(UScriptStruct::ICppStructOps);
@@ -2843,7 +2845,7 @@ namespace RC
                 Ini::Parser parser;
                 parser.parse(file);
 
-                Output::send<Color::Blue>(STR("Getting ordered lists from ini file\n"));
+                if (UE4SSDebug::get_debug_level() >= 1) Output::send<Color::Blue>(STR("Getting ordered lists from ini file\n"));
 
                 auto calculate_virtual_function_offset = []<typename... BaseSizes>(uint32_t current_index, BaseSizes... base_sizes) -> uint32_t {
                     return current_index == 0 ? 0 : (current_index + (base_sizes + ...)) * 8;
@@ -2858,56 +2860,56 @@ namespace RC
                     return vtable_size;
                 };
 
-                Output::send<Color::Blue>(STR("UObjectBase\n"));
+                if (UE4SSDebug::get_debug_level() >= 1) Output::send<Color::Blue>(STR("UObjectBase\n"));
                 uint32_t uobjectbase_size = retrieve_vtable_layout_from_ini(STR("UObjectBase"), [&](uint32_t index, File::StringType& item) {
                     uint32_t offset = calculate_virtual_function_offset(index, 0);
-                    Output::send(STR("UObjectBase::{} = 0x{:X}\n"), item, offset);
+                    if (UE4SSDebug::get_debug_level() >= 1) Output::send(STR("UObjectBase::{} = 0x{:X}\n"), item, offset);
                     Unreal::UObjectBase::VTableLayoutMap.emplace(item, offset);
                 });
 
-                Output::send<Color::Blue>(STR("UObjectBaseUtility\n"));
+                if (UE4SSDebug::get_debug_level() >= 1) Output::send<Color::Blue>(STR("UObjectBaseUtility\n"));
                 uint32_t uobjectbaseutility_size = retrieve_vtable_layout_from_ini(STR("UObjectBaseUtility"), [&](uint32_t index, File::StringType& item) {
                     uint32_t offset = calculate_virtual_function_offset(index, uobjectbase_size);
-                    Output::send(STR("UObjectBaseUtility::{} = 0x{:X}\n"), item, offset);
+                    if (UE4SSDebug::get_debug_level() >= 1) Output::send(STR("UObjectBaseUtility::{} = 0x{:X}\n"), item, offset);
                     Unreal::UObjectBaseUtility::VTableLayoutMap.emplace(item, offset);
                 });
 
-                Output::send<Color::Blue>(STR("UObject\n"));
+                if (UE4SSDebug::get_debug_level() >= 1) Output::send<Color::Blue>(STR("UObject\n"));
                 uint32_t uobject_size = retrieve_vtable_layout_from_ini(STR("UObject"), [&](uint32_t index, File::StringType& item) {
                     uint32_t offset = calculate_virtual_function_offset(index, uobjectbase_size, uobjectbaseutility_size);
-                    Output::send(STR("UObject::{} = 0x{:X}\n"), item, offset);
+                    if (UE4SSDebug::get_debug_level() >= 1) Output::send(STR("UObject::{} = 0x{:X}\n"), item, offset);
                     Unreal::UObject::VTableLayoutMap.emplace(item, offset);
                 });
 
-                Output::send<Color::Blue>(STR("UField\n"));
+                if (UE4SSDebug::get_debug_level() >= 1) Output::send<Color::Blue>(STR("UField\n"));
                 uint32_t ufield_size = retrieve_vtable_layout_from_ini(STR("UField"), [&](uint32_t index, File::StringType& item) {
                     uint32_t offset = calculate_virtual_function_offset(index, uobjectbase_size, uobjectbaseutility_size, uobject_size);
-                    Output::send(STR("UField::{} = 0x{:X}\n"), item, offset);
+                    if (UE4SSDebug::get_debug_level() >= 1) Output::send(STR("UField::{} = 0x{:X}\n"), item, offset);
                     Unreal::UField::VTableLayoutMap.emplace(item, offset);
                 });
 
-                Output::send<Color::Blue>(STR("UEngine\n"));
+                if (UE4SSDebug::get_debug_level() >= 1) Output::send<Color::Blue>(STR("UEngine\n"));
                 uint32_t uengine_size = retrieve_vtable_layout_from_ini(STR("UEngine"), [&](uint32_t index, File::StringType& item) {
                     uint32_t offset = calculate_virtual_function_offset(index, uobjectbase_size, uobjectbaseutility_size, uobject_size);
-                    Output::send(STR("UEngine::{} = 0x{:X}\n"), item, offset);
+                    if (UE4SSDebug::get_debug_level() >= 1) Output::send(STR("UEngine::{} = 0x{:X}\n"), item, offset);
                     Unreal::UEngine::VTableLayoutMap.emplace(item, offset);
                 });
 
-                Output::send<Color::Blue>(STR("UScriptStruct::ICppStructOps\n"));
+                if (UE4SSDebug::get_debug_level() >= 1) Output::send<Color::Blue>(STR("UScriptStruct::ICppStructOps\n"));
                 retrieve_vtable_layout_from_ini(STR("UScriptStruct::ICppStructOps"), [&](uint32_t index, File::StringType& item) {
                     uint32_t offset = calculate_virtual_function_offset(index, 0);
-                    Output::send(STR("UScriptStruct::ICppStructOps::{} = 0x{:X}\n"), item, offset);
+                    if (UE4SSDebug::get_debug_level() >= 1) Output::send(STR("UScriptStruct::ICppStructOps::{} = 0x{:X}\n"), item, offset);
                     Unreal::UScriptStruct::ICppStructOps::VTableLayoutMap.emplace(item, offset);
                 });
 
-                Output::send<Color::Blue>(STR("FField\n"));
+                if (UE4SSDebug::get_debug_level() >= 1) Output::send<Color::Blue>(STR("FField\n"));
                 uint32_t ffield_size = retrieve_vtable_layout_from_ini(STR("FField"), [&](uint32_t index, File::StringType& item) {
                     uint32_t offset = calculate_virtual_function_offset(index, 0);
-                    Output::send(STR("FField::{} = 0x{:X}\n"), item, offset);
+                    if (UE4SSDebug::get_debug_level() >= 1) Output::send(STR("FField::{} = 0x{:X}\n"), item, offset);
                     Unreal::FField::VTableLayoutMap.emplace(item, offset);
                 });
 
-                Output::send<Color::Blue>(STR("FProperty\n"));
+                if (UE4SSDebug::get_debug_level() >= 1) Output::send<Color::Blue>(STR("FProperty\n"));
                 uint32_t fproperty_size = retrieve_vtable_layout_from_ini(STR("FProperty"), [&](uint32_t index, File::StringType& item) {
                     uint32_t offset{};
                     if (Unreal::Version::IsBelow(4, 25))
@@ -2918,7 +2920,7 @@ namespace RC
                     {
                         offset = calculate_virtual_function_offset(index, ffield_size);
                     }
-                    Output::send(STR("FProperty::{} = 0x{:X}\n"), item, offset);
+                    if (UE4SSDebug::get_debug_level() >= 1) Output::send(STR("FProperty::{} = 0x{:X}\n"), item, offset);
                     Unreal::FProperty::VTableLayoutMap.emplace(item, offset);
                 });
 
@@ -2932,65 +2934,65 @@ namespace RC
                     fproperty_size = ffield_size + fproperty_size;
                 }
 
-                Output::send<Color::Blue>(STR("FNumericProperty\n"));
+                if (UE4SSDebug::get_debug_level() >= 1) Output::send<Color::Blue>(STR("FNumericProperty\n"));
                 retrieve_vtable_layout_from_ini(STR("FNumericProperty"), [&](uint32_t index, File::StringType& item) {
                     uint32_t offset = calculate_virtual_function_offset(index, fproperty_size);
-                    Output::send(STR("FNumericProperty::{} = 0x{:X}\n"), item, offset);
+                    if (UE4SSDebug::get_debug_level() >= 1) Output::send(STR("FNumericProperty::{} = 0x{:X}\n"), item, offset);
                     Unreal::FNumericProperty::VTableLayoutMap.emplace(item, offset);
                 });
 
-                Output::send<Color::Blue>(STR("FMulticastDelegateProperty\n"));
+                if (UE4SSDebug::get_debug_level() >= 1) Output::send<Color::Blue>(STR("FMulticastDelegateProperty\n"));
                 retrieve_vtable_layout_from_ini(STR("FMulticastDelegateProperty"), [&](uint32_t index, File::StringType& item) {
                     uint32_t offset = calculate_virtual_function_offset(index, fproperty_size);
-                    Output::send(STR("FMulticastDelegateProperty::{} = 0x{:X}\n"), item, offset);
+                    if (UE4SSDebug::get_debug_level() >= 1) Output::send(STR("FMulticastDelegateProperty::{} = 0x{:X}\n"), item, offset);
                     Unreal::FMulticastDelegateProperty::VTableLayoutMap.emplace(item, offset);
                 });
 
-                Output::send<Color::Blue>(STR("FObjectPropertyBase\n"));
+                if (UE4SSDebug::get_debug_level() >= 1) Output::send<Color::Blue>(STR("FObjectPropertyBase\n"));
                 retrieve_vtable_layout_from_ini(STR("FObjectPropertyBase"), [&](uint32_t index, File::StringType& item) {
                     uint32_t offset = calculate_virtual_function_offset(index, fproperty_size);
-                    Output::send(STR("FObjectPropertyBase::{} = 0x{:X}\n"), item, offset);
+                    if (UE4SSDebug::get_debug_level() >= 1) Output::send(STR("FObjectPropertyBase::{} = 0x{:X}\n"), item, offset);
                     Unreal::FObjectPropertyBase::VTableLayoutMap.emplace(item, offset);
                 });
 
-                Output::send<Color::Blue>(STR("UStruct\n"));
+                if (UE4SSDebug::get_debug_level() >= 1) Output::send<Color::Blue>(STR("UStruct\n"));
                 retrieve_vtable_layout_from_ini(STR("UStruct"), [&](uint32_t index, File::StringType& item) {
                     uint32_t offset = calculate_virtual_function_offset(index, uobjectbase_size, uobjectbaseutility_size, uobject_size, ufield_size);
-                    Output::send(STR("UStruct::{} = 0x{:X}\n"), item, offset);
+                    if (UE4SSDebug::get_debug_level() >= 1) Output::send(STR("UStruct::{} = 0x{:X}\n"), item, offset);
                     Unreal::UStruct::VTableLayoutMap.emplace(item, offset);
                 });
 
-                Output::send<Color::Blue>(STR("FOutputDevice\n"));
+                if (UE4SSDebug::get_debug_level() >= 1) Output::send<Color::Blue>(STR("FOutputDevice\n"));
                 retrieve_vtable_layout_from_ini(STR("FOutputDevice"), [&](uint32_t index, File::StringType& item) {
                     uint32_t offset = calculate_virtual_function_offset(index, 0);
-                    Output::send(STR("FOutputDevice::{} = 0x{:X}\n"), item, offset);
+                    if (UE4SSDebug::get_debug_level() >= 1) Output::send(STR("FOutputDevice::{} = 0x{:X}\n"), item, offset);
                     Unreal::FOutputDevice::VTableLayoutMap.emplace(item, offset);
                 });
 
-                Output::send<Color::Blue>(STR("FMalloc\n"));
+                if (UE4SSDebug::get_debug_level() >= 1) Output::send<Color::Blue>(STR("FMalloc\n"));
                 retrieve_vtable_layout_from_ini(STR("FMalloc"), [&](uint32_t index, File::StringType& item) {
                     // We don't support FExec, so we're manually telling it the size.
                     static constexpr uint32_t fexec_size = 1;
                     uint32_t offset = calculate_virtual_function_offset(index, fexec_size);
-                    Output::send(STR("FMalloc::{} = 0x{:X}\n"), item, offset);
+                    if (UE4SSDebug::get_debug_level() >= 1) Output::send(STR("FMalloc::{} = 0x{:X}\n"), item, offset);
                     Unreal::FMalloc::VTableLayoutMap.emplace(item, offset);
                 });
 
-                Output::send<Color::Blue>(STR("AActor\n"));
+                if (UE4SSDebug::get_debug_level() >= 1) Output::send<Color::Blue>(STR("AActor\n"));
                 uint32_t aactor_size = retrieve_vtable_layout_from_ini(STR("AActor"), [&](uint32_t index, File::StringType& item) {
                     uint32_t offset = calculate_virtual_function_offset(index, uobjectbase_size, uobjectbaseutility_size, uobject_size);
-                    Output::send(STR("AActor::{} = 0x{:X}\n"), item, offset);
+                    if (UE4SSDebug::get_debug_level() >= 1) Output::send(STR("AActor::{} = 0x{:X}\n"), item, offset);
                     Unreal::AActor::VTableLayoutMap.emplace(item, offset);
                 });
 
-                Output::send<Color::Blue>(STR("AGameModeBase\n"));
+                if (UE4SSDebug::get_debug_level() >= 1) Output::send<Color::Blue>(STR("AGameModeBase\n"));
                 uint32_t agamemodebase_size = retrieve_vtable_layout_from_ini(STR("AGameModeBase"), [&](uint32_t index, File::StringType& item) {
                     uint32_t offset = calculate_virtual_function_offset(index, uobjectbase_size, uobjectbaseutility_size, uobject_size, aactor_size);
-                    Output::send(STR("AGameModeBase::{} = 0x{:X}\n"), item, offset);
+                    if (UE4SSDebug::get_debug_level() >= 1) Output::send(STR("AGameModeBase::{} = 0x{:X}\n"), item, offset);
                     Unreal::AGameModeBase::VTableLayoutMap.emplace(item, offset);
                 });
 
-                Output::send<Color::Blue>(STR("AGameMode\n"));
+                if (UE4SSDebug::get_debug_level() >= 1) Output::send<Color::Blue>(STR("AGameMode\n"));
                 retrieve_vtable_layout_from_ini(STR("AGameMode"), [&](uint32_t index, File::StringType& item) {
                     uint32_t offset = calculate_virtual_function_offset(index,
                                                                         Unreal::Version::IsAtLeast(4, 14)
@@ -3003,28 +3005,28 @@ namespace RC
                                                                         uobjectbaseutility_size,
                                                                         uobject_size,
                                                                         aactor_size);
-                    Output::send(STR("AGameMode::{} = 0x{:X}\n"), item, offset);
+                    if (UE4SSDebug::get_debug_level() >= 1) Output::send(STR("AGameMode::{} = 0x{:X}\n"), item, offset);
                     Unreal::AGameMode::VTableLayoutMap.emplace(item, offset);
                 });
 
-                Output::send<Color::Blue>(STR("UPlayer\n"));
+                if (UE4SSDebug::get_debug_level() >= 1) Output::send<Color::Blue>(STR("UPlayer\n"));
                 uint32_t uplayer_size = retrieve_vtable_layout_from_ini(STR("UPlayer"), [&](uint32_t index, File::StringType& item) {
                     uint32_t offset = calculate_virtual_function_offset(index, uobjectbase_size, uobjectbaseutility_size, uobject_size);
-                    Output::send(STR("UPlayer::{} = 0x{:X}\n"), item, offset);
+                    if (UE4SSDebug::get_debug_level() >= 1) Output::send(STR("UPlayer::{} = 0x{:X}\n"), item, offset);
                     Unreal::UPlayer::VTableLayoutMap.emplace(item, offset);
                 });
 
-                Output::send<Color::Blue>(STR("ULocalPlayer\n"));
+                if (UE4SSDebug::get_debug_level() >= 1) Output::send<Color::Blue>(STR("ULocalPlayer\n"));
                 retrieve_vtable_layout_from_ini(STR("ULocalPlayer"), [&](uint32_t index, File::StringType& item) {
                     uint32_t offset = calculate_virtual_function_offset(index, uobjectbase_size, uobjectbaseutility_size, uobject_size, uplayer_size);
-                    Output::send(STR("ULocalPlayer::{} = 0x{:X}\n"), item, offset);
+                    if (UE4SSDebug::get_debug_level() >= 1) Output::send(STR("ULocalPlayer::{} = 0x{:X}\n"), item, offset);
                     Unreal::ULocalPlayer::VTableLayoutMap.emplace(item, offset);
                 });
 
-                Output::send<Color::Blue>(STR("UDataTable\n"));
+                if (UE4SSDebug::get_debug_level() >= 1) Output::send<Color::Blue>(STR("UDataTable\n"));
                 retrieve_vtable_layout_from_ini(STR("UDataTable"), [&](uint32_t index, File::StringType& item) {
                     uint32_t offset = calculate_virtual_function_offset(index, uobjectbase_size, uobjectbaseutility_size, uobject_size, uplayer_size);
-                    Output::send(STR("UDataTable::{} = 0x{:X}\n"), item, offset);
+                    if (UE4SSDebug::get_debug_level() >= 1) Output::send(STR("UDataTable::{} = 0x{:X}\n"), item, offset);
                     Unreal::UDataTable::VTableLayoutMap.emplace(item, offset);
                 });
 
