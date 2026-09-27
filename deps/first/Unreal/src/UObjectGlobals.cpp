@@ -491,9 +491,15 @@ namespace RC::Unreal::UObjectGlobals
             }
             else
             {
-                for (UStruct* SuperStruct : TSuperStructRange(Class))
+                // TSuperStructRange starts at the class's super, so the class itself is checked first (patch 29 left
+                // this out, and every FindAllOf/FindFirstOf for an exact native class came back empty).
+                bMatches = Class->GetNamePrivate().Equals(ClassName);
+                if (!bMatches)
                 {
-                    if (SuperStruct->GetNamePrivate().Equals(ClassName)) { bMatches = true; break; }
+                    for (UStruct* SuperStruct : TSuperStructRange(Class))
+                    {
+                        if (SuperStruct->GetNamePrivate().Equals(ClassName)) { bMatches = true; break; }
+                    }
                 }
                 Results.emplace(Class, bMatches);
             }
