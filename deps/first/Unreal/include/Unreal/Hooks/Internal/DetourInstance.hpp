@@ -23,6 +23,10 @@
 #pragma push_macro("ensure")
 #undef ensure
 
+// Stack address of the innermost engine hook running on this thread (a local in TDetourInstance::Invoke), or null.
+// LuaMadeSimple::throw_error uses it to avoid raising a Lua error into a protected call entered outside that hook.
+extern "C" thread_local void* ue4ss_innermost_hook_frame;
+
 namespace RC::Unreal::Hook
 {
     void SetOriginalFunctionCallResult(auto& IterationData, void* Value)
@@ -366,6 +370,13 @@ namespace RC::Unreal::Hook::Internal
         {
             // Make the ICallbackIterationData that gets passed by reference to each callback
             TCallbackIterationData<InHookReturnType> IterationData{ DetourName };
+
+            struct FHookFrameMark
+            {
+                void* Saved;
+                explicit FHookFrameMark(void* Frame) : Saved(ue4ss_innermost_hook_frame) { ue4ss_innermost_hook_frame = Frame; }
+                ~FHookFrameMark() { ue4ss_innermost_hook_frame = Saved; }
+            } HookFrameMark{&IterationData};
 
             // Call prehook callbacks
             InvokeCallbacks(EHookType::Pre, IterationData, Args...);

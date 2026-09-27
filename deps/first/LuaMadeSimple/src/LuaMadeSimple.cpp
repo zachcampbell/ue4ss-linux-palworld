@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <cstdint>
 #include <cstdio>
 #include <mutex>
 #include <stdexcept>
@@ -13,6 +14,8 @@
 #include <lstate.h>
 
 #include <Helpers/String.hpp>
+
+extern "C" thread_local void* ue4ss_innermost_hook_frame; // Unreal/Hooks/Internal/DetourInstance.hpp
 
 namespace RC::LuaMadeSimple
 {
@@ -1106,6 +1109,20 @@ namespace RC::LuaMadeSimple
 
     auto throw_error(lua_State* lua_state, const std::string& error_message) -> void
     {
+        // A Lua error jumps (a C++ throw of lua_longjmp* in this build) to the innermost protected call, found through
+        // errorJmp, which lives on the C stack. If that call was entered outside the engine hook we are running under
+        // (Lua called a UFunction, the game fired a hook, UE4SS pushed values for a Lua callback and one failed), the
+        // jump crosses the game's frames: the hook dispatcher catches it as a non-standard exception and removes the
+        // hook, and the Lua lock taken by lua_error is never released, so the next Lua call on the game thread hangs.
+        // Report it as a C++ error instead, before touching the stack of a state that an outer frame is still using.
+        const void* target = lua_state->errorJmp ? static_cast<const void*>(lua_state->errorJmp)
+                                                 : static_cast<const void*>(lua_state->l_G->mainthread->errorJmp);
+        if (target && ue4ss_innermost_hook_frame &&
+            reinterpret_cast<uintptr_t>(target) > reinterpret_cast<uintptr_t>(ue4ss_innermost_hook_frame))
+        {
+            throw std::runtime_error{error_message};
+        }
+
         auto final_message = handle_error(lua_state, error_message);
 
         lua_state_errors.emplace(lua_state, final_message);

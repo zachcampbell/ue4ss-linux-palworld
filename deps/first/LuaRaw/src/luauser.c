@@ -52,7 +52,13 @@ void LuaLockInitial(lua_State* L)
 {
     if (!Gl.Init)
     {
-        pthread_mutex_init(&Gl.LockSct, NULL);
+        /* Recursive, as the Windows branch's critical section is: a lock count left behind by an error that escaped
+           Lua must not freeze the thread that holds it on its next Lua call. */
+        pthread_mutexattr_t attr;
+        pthread_mutexattr_init(&attr);
+        pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE);
+        pthread_mutex_init(&Gl.LockSct, &attr);
+        pthread_mutexattr_destroy(&attr);
         Gl.Init = 1;
     }
 }

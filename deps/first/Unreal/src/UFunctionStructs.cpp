@@ -5,6 +5,8 @@
 #include <Unreal/Hooks.hpp>
 #include <Unreal/CoreUObject/UObject/UnrealType.hpp>
 
+extern "C" thread_local void* ue4ss_innermost_hook_frame = nullptr;
+
 namespace RC::Unreal
 {
     std::atomic<CallbackId> UnrealScriptFunctionData::HookIndexCounter{1};
