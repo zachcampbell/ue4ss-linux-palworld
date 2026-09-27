@@ -42,7 +42,8 @@ namespace RC::Unreal
     // bypassing the (inlined, non-existent) FName constructor symbol.
     class FName;
     namespace PalworldNameProvider {
-        using EngineFindNameFn = void (*)(uint64_t*, const char16_t*);
+        // The engine's FName(const TCHAR*, EFindName): (out FName, string, FindType).
+        using EngineFindNameFn = void (*)(uint64_t*, const char16_t*, int32_t);
         auto LocateEngineFindName() -> EngineFindNameFn;
         auto FindName(const CharType* StrName, EFindName FindType) -> FName;
     }

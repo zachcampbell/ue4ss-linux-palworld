@@ -65,11 +65,15 @@ namespace RC::Unreal
     namespace PalworldNameProvider
     {
         // Resolved at init by LocateEngineFindName(). Points to the engine's
-        // find-or-add wrapper (0x7941c10-equivalent). Signature:
-        //   void find_name(uint64_t* out_index, const wchar_t* str)
-        // The wrapper computes length + wide-flag and calls the hash/lookup core,
-        // writing the resulting ComparisonIndex into *out_index.
-        using EngineFindNameFn = void (*)(uint64_t*, const char16_t*);
+        // FName(const TCHAR*, EFindName) constructor (0x7976040 in v1.0.5.102999):
+        //   void ctor(uint64_t* out_name, const char16_t* str, int32_t find_type)
+        // It computes length + wide-flag and calls the split/lookup core, which
+        // passes find_type (edx) untouched to the name pool: 0 = find only,
+        // 1 = find or add. It writes the FName to *out_name: low 32 bits the
+        // ComparisonIndex, high 32 bits the Number (suffix + 1, 0 for none).
+        // The third argument must be passed: called with two, the pool reads
+        // whatever the caller left in edx, and a new name came back None whenever
+        // that happened to be 0 (Foo_1, Foo_01, Foo_007 while Foo_10 worked).
         static EngineFindNameFn g_engine_find_name{};
 
         // Signature of the wrapper prologue. This is the function at 0x7941c10:
@@ -148,65 +152,27 @@ namespace RC::Unreal
         }
 
         // Native FName(const CharType*, EFindName) backend for Linux/Palworld.
-        // Delegates to the engine's own find-or-add name lookup and constructs an
-        // FName from the returned ComparisonIndex. The Number field replicates the
-        // engine's "_N" suffix parsing (see below) so constructed names compare
-        // equal to engine-created names.
+        // Calls the engine's own constructor and takes the FName it writes.
         auto FindName(const CharType* StrName, EFindName FindType) -> FName
         {
             if (!StrName) { return FName{}; }
             auto fn = LocateEngineFindName();
             if (!fn) { return FName{}; }
 
-            // UE FName convention (FName::Init / SplitNameWithNumber): a trailing
-            // "_N" suffix is split off — "BountyProof_1" resolves to the BASE name
-            // "BountyProof" (ComparisonIndex) with a STORED Number of N + 1.
-            // Stored Number 0 means "no suffix" (NAME_NO_NUMBER_INTERNAL), and
-            // ToString prints Number - 1, so stored Number 2 displays as "_1".
-            //
-            // The engine's find-or-add performs this split internally and returns
-            // the base name's ComparisonIndex. We must replicate the Number side
-            // or FName equality (ComparisonIndex + Number) against engine-created
-            // names — e.g. inventory item StaticIDs — fails. Verified empirically:
-            // stored Number must be suffix + 1; storing the raw suffix (Number 1
-            // for "_1") does NOT match game items.
-            uint32_t parsed_number = 0;
-            StringType base_name(StrName);
-            const size_t len = base_name.size();
-            if (len > 2)
-            {
-                size_t digit_start = len;
-                while (digit_start > 0 && base_name[digit_start - 1] >= '0' && base_name[digit_start - 1] <= '9')
-                {
-                    --digit_start;
-                }
-                // Need at least one digit, a '_' before the digits, and at most 9
-                // digits (larger suffixes don't occur in practice and overflow
-                // even the engine's own parsing).
-                if (digit_start < len && digit_start > 0 && base_name[digit_start - 1] == '_' && len - digit_start <= 9)
-                {
-                    uint32_t num = 0;
-                    for (size_t i = digit_start; i < len; ++i)
-                    {
-                        num = num * 10 + static_cast<uint32_t>(base_name[i] - '0');
-                    }
-                    parsed_number = num + 1; // stored Number = suffix + 1
-                }
-            }
-
-            // The engine wrapper writes a 64-bit value: high 32 = hash, low 32 =
-            // ComparisonIndex. We only need the ComparisonIndex (low 32 bits).
             uint64_t result = 0;
-            fn(&result, reinterpret_cast<const char16_t*>(StrName));
+            fn(&result, reinterpret_cast<const char16_t*>(StrName), static_cast<int32_t>(FindType));
             const uint32_t comparison_index = static_cast<uint32_t>(result);
             if (comparison_index == 0) { return FName{}; }
 
+            // The engine splits a trailing "_N" itself (UE rules: at most 10 digits, no
+            // leading zero unless the suffix is "_0") and returns the stored Number,
+            // N + 1, so FName equality holds against engine-created names.
             FName name{};
             name.ComparisonIndex = FNameEntryId::FromUnstableInt(comparison_index);
 #if WITH_CASE_PRESERVING_NAME
             name.DisplayIndex = name.ComparisonIndex;
 #endif
-            name.Number = parsed_number;
+            name.Number = static_cast<uint32_t>(result >> 32);
             return name;
         }
     } // namespace PalworldNameProvider
