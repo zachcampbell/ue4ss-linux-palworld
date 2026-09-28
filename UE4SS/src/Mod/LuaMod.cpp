@@ -242,12 +242,15 @@ namespace RC
 
     static auto lua_unreal_script_function_hook_post(Unreal::UnrealScriptFunctionCallableContext context, void* custom_data) -> void
     {
+    // Held for the whole post-hook, as in the pre-hook: the callback runs on the mod's shared hook_lua state, which the
+    // async thread also pushes onto (ExecuteInGameThread from a delayed action). Guarding only remove_if_scheduled let
+    // the two interleave on one Lua stack and crash the game thread.
+    std::lock_guard<std::recursive_mutex> ue4ss_lua_guard{LuaMod::m_thread_actions_mutex}; // Lua-state thread safety
         // Fetch the data corresponding to this UFunction
         auto& lua_data = *static_cast<LuaUnrealScriptFunctionData*>(custom_data);
 
         // Returns true if a hooks were removed.
         auto remove_if_scheduled = [&] -> bool {
-        std::lock_guard<std::recursive_mutex> ue4ss_lua_guard{LuaMod::m_thread_actions_mutex}; // Lua-state thread safety
             if (lua_data.scheduled_for_removal)
             {
                 const auto function_name_no_prefix = get_function_name_without_prefix(lua_data.unreal_function->GetFullName());
